@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F1 Driving Lab — Multi-track learning</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;background:#101722;color:#ecf2fa;font:16px system-ui,sans-serif}
+header{padding:24px 32px;border-bottom:1px solid #334358}h1{margin:0 0 8px;font-size:29px}
+p{color:#9bacbf;line-height:1.6}main{max-width:1400px;margin:auto;padding:24px;display:grid;grid-template-columns:2fr 1fr;gap:24px}
+canvas{width:100%;background:#182333;border-radius:14px;border:1px solid #334358}
+.panel{background:#182333;border:1px solid #334358;border-radius:14px;padding:20px}
+label{display:block;margin:14px 0 7px;color:#9bacbf}button,select,input{font:inherit}
+select,button{background:#28403f;color:#ecf2fa;border:1px solid #4de2c2;padding:9px;border-radius:8px;max-width:100%}
+select:disabled{opacity:.45}button{cursor:pointer;margin:12px 6px 5px 0}
+input[type=range]{width:100%;accent-color:#4de2c2}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}.stat{background:#101722;padding:12px;border-radius:8px}
+.caption{font-size:12px;color:#9bacbf}.value{font-size:22px;color:#4de2c2}
+a{color:#4de2c2}.gallery{max-width:1400px;margin:auto;padding:0 24px 32px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.gallery img{width:100%;border-radius:12px}.gallery h2{font-size:20px}
+@media(max-width:850px){main,.gallery{grid-template-columns:1fr}header{padding:20px}}
+</style>
+</head>
+<body>
+<header><h1>ELEVEN CIRCUITS / One learning driver</h1>
+<p>120 real training rounds · original + ten new training tracks · two unseen test tracks · offline playback</p></header>
+<main>
+<div>
+<canvas id="view" width="1100" height="820" aria-label="Animated training-grid and driving simulation"></canvas>
+<p id="clockCaption"></p>
+<canvas id="curve" width="1100" height="300" aria-label="Learning curves at the selected round"></canvas>
+<p>Green = training circuits. Blue = unseen-test results generated only after the schedule was finished.
+The car icon is enlarged. Individual replay poses between saved samples are interpolated for smooth playback.</p>
+</div>
+<section class="panel">
+<label for="mode">Animation mode</label>
+<select id="mode"><option value="learning">Training process — all 11 tracks</option><option value="drive">Car driving — selected track</option></select>
+<label for="round">Training round: <strong id="roundLabel">0</strong></label>
+<input id="round" type="range" min="0" max="120" value="0">
+<label for="track">Circuit</label><select id="track"></select>
+<label for="scenario">Fixed test start</label>
+<select id="scenario"><option value="0">1 · Start straight</option><option value="1">2 · Corner entry</option><option value="2">3 · Recovery start</option></select>
+<label for="speed">Playback speed</label>
+<select id="speed"><option value="1">1×</option><option value="4" selected>4×</option><option value="8">8×</option><option value="16">16×</option></select>
+<div><button id="play">Pause</button><button id="restart">Restart</button></div>
+<label for="scrub">Driving timeline</label><input id="scrub" type="range" min="0" max="1000" value="0">
+<div class="stats">
+<div class="stat"><div class="caption" id="captionOne">Training starts finished</div><div class="value" id="primary"></div></div>
+<div class="stat"><div class="caption" id="captionTwo">Mean lap progress</div><div class="value" id="progress"></div></div>
+<div class="stat"><div class="caption" id="captionThree">Labeled examples</div><div class="value" id="secondary"></div></div>
+<div class="stat"><div class="caption" id="captionFour">Actual weight updates</div><div class="value" id="time"></div></div>
+</div>
+<p id="result"></p><p id="phase"></p>
+<p><a href="visuals/learning_process.gif">Training movie</a> · <a href="visuals/driving_comparison.gif">Driving comparison</a></p>
+<p><a href="training_deck.html">Presentation</a> · <a href="training_deck.pptx">PowerPoint</a> · <a href="metrics.csv">All-round metrics</a></p>
+<p><a href="../IMPROVEMENT_PLAN.md">Improvement plan</a> · <a href="../MULTITRACK_RESULTS.md">Results and reproduction</a></p>
+<p>Imitation learning, not reinforcement learning. Original F1-inspired tracks, perfect simulated geometry,
+one seed and simplified physics. Not a real-car controller.</p>
+</section>
+</main>
+<div class="gallery">
+<div><h2>The learning process, round by round</h2><img src="visuals/learning_process.gif" alt="All 120 actual training rounds, showing improvement across eleven circuits"></div>
+<div><h2>Actual drives, equal simulated time</h2><img src="visuals/driving_comparison.gif" alt="Cars driving on three tracks with untrained, early and final checkpoints"></div>
+<img src="visuals/track_atlas.png" alt="Eleven training circuits and two unseen circuits">
+<img src="visuals/quality.png" alt="Lateral error, lap time and steering variation across completed rounds">
+</div>
+<script id="experiment-data" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const data=JSON.parse(document.getElementById("experiment-data").textContent);
+const $=id=>document.getElementById(id),canvas=$("view"),ctx=canvas.getContext("2d"),curve=$("curve"),curveCtx=curve.getContext("2d");
+let activeRound=0,trackId=2,scenario=0,driveTime=0,learningClock=0,playing=true,last=null;
+data.catalog.forEach(c=>{const option=document.createElement("option");option.value=c.id;
+option.textContent=`${c.name} · ${c.split==="train"?"training":"UNSEEN TEST"}`;$("track").append(option)});
+$("track").value=trackId;
+const bounds=data.tracks.map(track=>{
+ const xs=track.xy.map(p=>p[0]),ys=track.xy.map(p=>p[1]);
+ return [Math.min(...xs)-25,Math.max(...xs)+25,Math.min(...ys)-25,Math.max(...ys)+25];
+});
+function selected(){return data.frames[activeRound][trackId][scenario]}
+function drawCircuit(id,x,y,width,height,trace,state,color,title){
+ const track=data.tracks[id],[minX,maxX,minY,maxY]=bounds[id];
+ const padding=20,top=32,s=Math.min((width-padding*2)/(maxX-minX),(height-top-padding)/(maxY-minY));
+ const ox=x+(width-s*(maxX-minX))/2,oy=y+top+(height-top-s*(maxY-minY))/2;
+ const project=p=>[ox+(p[0]-minX)*s,oy+(maxY-p[1])*s];
+ function path(points,closed=false){ctx.beginPath();points.forEach((p,i)=>{const q=project(p);i?ctx.lineTo(...q):ctx.moveTo(...q)});if(closed)ctx.closePath()}
+ ctx.save();ctx.beginPath();ctx.rect(x,y,width,height);ctx.clip();
+ ctx.fillStyle="#182333";ctx.fillRect(x,y,width,height);
+ path(track.left.concat([...track.right].reverse()),true);ctx.fillStyle="#405064";ctx.fill();
+ ctx.strokeStyle="#c5cfdb";ctx.lineWidth=width>400?1.5:.7;
+ path(track.left,true);ctx.stroke();path(track.right,true);ctx.stroke();
+ ctx.strokeStyle="#718196";ctx.setLineDash([5,5]);path(track.xy,true);ctx.stroke();ctx.setLineDash([]);
+ ctx.strokeStyle="#ecf2fa";ctx.lineWidth=width>400?4:1.5;path([track.left[0],track.right[0]]);ctx.stroke();
+ if(trace.length){path(trace.map(row=>[row[1],row[2]]));ctx.strokeStyle=color;ctx.lineWidth=width>400?3:1.6;ctx.stroke()}
+ if(state){const point=project([state[1],state[2]]);ctx.save();ctx.translate(...point);ctx.rotate(-state[3]);
+ const size=width>400?9:3.3;ctx.fillStyle="#ffc56b";ctx.fillRect(-size,-size/2,size*2,size);ctx.restore()}
+ ctx.fillStyle="#ecf2fa";ctx.font=`bold ${width>400?22:13}px system-ui`;ctx.fillText(title,x+12,y+23);
+ ctx.restore();
+}
+function drawCurve(){
+ const c=curveCtx,w=curve.width,h=curve.height,top=42,bottom=h-43;
+ c.clearRect(0,0,w,h);
+ function panel(left,right,title,maximum,keys,format){
+  c.fillStyle="#ecf2fa";c.font="bold 17px system-ui";c.fillText(title,left,25);c.font="12px system-ui";
+  for(let step=0;step<=4;step++){const value=maximum*step/4,y=bottom-step/4*(bottom-top);c.strokeStyle="#334358";c.lineWidth=1;c.beginPath();c.moveTo(left,y);c.lineTo(right,y);c.stroke();c.fillStyle="#9bacbf";c.fillText(format(value),left-48,y+4)}
+  for(let r=0;r<=120;r+=20){const x=left+r/120*(right-left);c.fillStyle="#9bacbf";c.fillText(String(r),x-8,h-18)}
+  for(const [key,color] of keys){
+   c.beginPath();let begun=false;
+   data.history.slice(0,activeRound+1).forEach(row=>{if(row[key]===null)return;const x=left+row.round/120*(right-left),y=bottom-row[key]/maximum*(bottom-top);begun?c.lineTo(x,y):c.moveTo(x,y);begun=true});
+   c.strokeStyle=color;c.lineWidth=2.5;c.stroke();
+  }
+  const x=left+activeRound/120*(right-left);c.strokeStyle="#ffc56b";c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();
+ }
+ panel(60,510,"LAP PROGRESS / TRAINING ROUNDS",100,
+  [["train_progress_pct","#4de2c2"],["holdout_progress_pct","#76a9ff"]],v=>v.toFixed(0)+"%");
+ const maximum=Math.max(...data.history.map(row=>row.train_lateral_completed_m??0))*1.1;
+ panel(625,1070,"COMPLETED-LAP LANE ERROR / METERS",maximum,
+  [["train_lateral_completed_m","#4de2c2"],["holdout_lateral_completed_m","#76a9ff"]],v=>v.toFixed(2));
+}
+function interpolatedState(trace,time){
+ let index=0;while(index+1<trace.length&&trace[index+1][0]<=time)index++;
+ const a=trace[index],b=trace[Math.min(index+1,trace.length-1)];
+ const fraction=b[0]===a[0]?0:Math.max(0,Math.min(1,(time-a[0])/(b[0]-a[0])));
+ const state=a.map((v,i)=>v+(b[i]-v)*fraction);
+ const delta=((b[3]-a[3]+Math.PI)%(2*Math.PI)+2*Math.PI)%(2*Math.PI)-Math.PI;
+ state[3]=a[3]+delta*fraction;
+ return {index,state};
+}
+function update(){
+ const mode=$("mode").value,row=data.history[activeRound];
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+ $("roundLabel").textContent=activeRound;$("round").value=activeRound;
+ const learning=mode==="learning";$("track").disabled=learning;$("scenario").disabled=learning;$("scrub").disabled=learning;
+ if(learning){
+  data.catalog.filter(c=>c.split==="train").forEach((c,i)=>{
+   const item=data.frames[activeRound][c.id][0],trace=item.trace;
+   const count=data.frames[activeRound][c.id].filter(s=>s.metric.completed).length;
+   drawCircuit(c.id,(i%4)*275,Math.floor(i/4)*273,273,271,trace,trace[trace.length-1],
+     item.metric.completed?"#4de2c2":"#ff5b65",`${c.name}  ${count}/3`);
+  });
+  ctx.fillStyle="#4de2c2";ctx.font="bold 24px system-ui";ctx.fillText(`ROUND ${activeRound} / 120`,840,605);
+  ctx.fillStyle="#ecf2fa";ctx.font="18px system-ui";ctx.fillText(row.phase,840,641);
+  ctx.fillText(`${row.train_completed}/33 train starts`,840,681);ctx.fillText(`${row.holdout_completed}/6 unseen starts`,840,720);
+  ctx.fillText(`Lane error ${row.train_lateral_completed_m===null?"—":row.train_lateral_completed_m.toFixed(3)} m`,840,760);
+  $("captionOne").textContent="Training starts finished";$("primary").textContent=`${row.train_completed}/33`;
+  $("captionTwo").textContent="Mean training lap progress";$("progress").textContent=row.train_progress_pct.toFixed(1)+"%";
+  $("captionThree").textContent="Labeled examples";$("secondary").textContent=row.samples.toLocaleString();
+  $("captionFour").textContent="Actual weight updates";$("time").textContent=row.optimizer_updates.toLocaleString();
+  $("result").textContent=`Unseen post-test: ${row.holdout_completed}/6 starts completed. No unseen data was used for learning.`;
+  $("clockCaption").textContent="TRAINING CLOCK: each step advances the actual training round. Paths show saved learner-only test drives with that round's weights.";
+ }else{
+  const item=selected(),trace=item.trace,metric=item.metric,{index,state}=interpolatedState(trace,driveTime);
+  drawCircuit(trackId,0,0,canvas.width,canvas.height,[...trace.slice(0,index+1),state],state,
+    metric.completed?"#4de2c2":"#ff5b65",`${data.catalog[trackId].name.toUpperCase()} / ROUND ${activeRound}`);
+  $("captionOne").textContent="Speed";$("primary").textContent=(state[4]*3.6).toFixed(0)+" km/h";
+  $("captionTwo").textContent="This drive's lap progress";$("progress").textContent=(Math.min(state[7],1)*100).toFixed(1)+"%";
+  $("captionThree").textContent="Lateral error";$("secondary").textContent=state[6].toFixed(2)+" m";
+  $("captionFour").textContent="Simulated driving time";$("time").textContent=state[0].toFixed(1)+" s";
+  $("scrub").value=Math.round(driveTime/trace[trace.length-1][0]*1000);
+  $("result").textContent=(driveTime>=trace[trace.length-1][0]?"End: ":"Saved outcome: ")+metric.end_reason.replaceAll("_"," ")+
+    ` / ${(metric.progress*100).toFixed(1)}% of the circuit`;
+  $("clockCaption").textContent="DRIVING CLOCK: actual saved model evaluations, smoothly interpolated between poses. Failed drives stop; there are no teacher interventions.";
+ }
+ $("phase").textContent=`Collection curriculum: ${row.phase}. All fixed test starts use unchanged conditions.`;
+ drawCurve();
+}
+function reset(){activeRound=+$("round").value;trackId=+$("track").value;scenario=+$("scenario").value;driveTime=0;learningClock=activeRound;last=null;update()}
+for(const id of ["round","track","scenario"]){$(id).addEventListener(id==="round"?"input":"change",reset)}
+$("mode").addEventListener("change",()=>{$("round").value=$("mode").value==="drive"?120:0;reset()});
+$("play").addEventListener("click",()=>{playing=!playing;$("play").textContent=playing?"Pause":"Play";last=null});
+$("restart").addEventListener("click",()=>{if($("mode").value==="learning")$("round").value=0;reset();playing=true;$("play").textContent="Pause"});
+$("scrub").addEventListener("input",()=>{const trace=selected().trace;driveTime=+$("scrub").value/1000*trace[trace.length-1][0];update()});
+function tick(now){
+ if(last!==null&&playing){
+  const delta=Math.min((now-last)/1000,.1),speed=+$("speed").value;
+  if($("mode").value==="learning"){learningClock=Math.min(120,learningClock+delta*speed*.5);const number=Math.floor(learningClock);if(number!==activeRound){activeRound=number;update()}}
+  else{const trace=selected().trace;driveTime=Math.min(driveTime+delta*speed,trace[trace.length-1][0]);update()}
+ }
+ last=now;requestAnimationFrame(tick);
+}
+reset();requestAnimationFrame(tick);
+</script>
+</body>
+</html>

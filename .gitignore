@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+.browsers/
+
+# Generated experiment outputs and bundles (multi-GB; rebuild with the commands in README.md)
+/artifacts/
+/multitrack_artifacts/
+/race_artifacts/
+/wall_artifacts/
+/wall_artifacts_attempt_1/
+/student_artifacts/
+/student_v2_artifacts/
+/*_reproduction/
+/new_run/
+/*.zip
+/student_bundle_verification.json
+# Sibling teaching collection with its own data and bundles; version it separately
+/classic_ml_samples/

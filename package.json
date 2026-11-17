@@ -1,0 +1,17 @@
+{
+  "name": "f1-driving-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser validation for the offline training replay and slide deck",
+  "scripts": {
+    "test:browser": "node tests/browser.mjs",
+    "test:browser:multitrack": "node tests/multitrack-browser.mjs",
+    "test:browser:race": "node tests/race-browser.mjs",
+    "test:browser:walls": "node tests/wall-browser.mjs",
+    "test:student": "node --test tests/student-engine.cjs",
+    "test:browser:student": "node tests/student-browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}

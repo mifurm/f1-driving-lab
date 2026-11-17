@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GP-X / Per-track driver learning</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101722;color:#ecf2fa;font:15px system-ui,sans-serif}
+header,main{max-width:1500px;margin:auto;padding:18px}h1{font-size:27px;margin:6px 0}p{color:#9bacbf;line-height:1.55}
+.layout{display:grid;grid-template-columns:2.2fr 1fr;gap:18px}canvas{width:100%;background:#182333;border:1px solid #334358;border-radius:12px}
+.panel{background:#182333;border:1px solid #334358;padding:18px;border-radius:12px}
+label{display:block;color:#9bacbf;margin:12px 0 6px}select,button{font:inherit;color:#ecf2fa;background:#28403f;border:1px solid #4de2c2;border-radius:7px;padding:8px;max-width:100%}
+button{cursor:pointer;margin:9px 5px 8px 0}input[type=range]{width:100%;accent-color:#4de2c2}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:9px}.stat{background:#101722;padding:11px;border-radius:8px}
+.caption{font-size:11px;color:#9bacbf}.value{font-size:24px;color:#4de2c2}.bar{height:13px;background:#101722;border-radius:5px;overflow:hidden;margin:6px 0}
+.bar div{height:100%;width:0}.gears{display:flex;gap:5px;margin:9px 0}.gears span{padding:5px 8px;border:1px solid #334358;border-radius:5px}.gears .active{color:#101722;background:#ffc56b}
+.note{font-size:12px;color:#9bacbf}a{color:#4de2c2}details{margin-top:18px}.table{max-height:400px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #334358;text-align:left}
+.badge{color:#ffc56b;font-weight:bold}@media(max-width:800px){.layout{grid-template-columns:1fr}.value{font-size:22px}}
+</style></head><body>
+<header><div class="badge">RECORDED ML TRAINING / GP-X COCKPIT</div><h1 id="title"></h1>
+<p id="description"></p></header>
+<main class="layout">
+<section>
+<canvas id="view" width="1100" height="650" aria-label="Moving fictional race car with wings wheels and recorded brake lights"></canvas>
+<p id="sourceCaption"></p>
+<canvas id="telemetry" width="1100" height="470" aria-label="Speed throttle brake gear and engine RPM during the selected drive"></canvas>
+<p class="note">Telemetry is recorded simulation data. Pedals and gears are discrete held values; pose and speed are interpolated.
+Throttle is the requested pedal input—an automatic shift can interrupt delivered torque.</p>
+<canvas id="learning" width="1100" height="290" aria-label="This track's progress and completed-lap lane error across all training attempts"></canvas>
+<details><summary>All 121 attempts on this circuit</summary><div class="table"><table id="attemptTable"></table></div></details>
+</section>
+<aside class="panel">
+<label for="mode">Show the driver learning</label>
+<select id="mode">
+<option value="sequence">Every attempt, automatically 0 → 120</option>
+<option value="single">One recorded test attempt</option>
+<option value="compare">Compare untrained / selected / final</option>
+<option id="rolloutOption" value="rollout">Actual training-data rollout</option>
+</select>
+<label for="round" id="roundCaption"><span id="roundKind">Saved model attempt</span>: <strong id="roundLabel">0</strong></label>
+<input id="round" type="range" min="0" max="120" value="0">
+<label for="speed">Playback speed</label><select id="speed">
+<option value="1">1× simulated time</option><option value="4">4×</option><option value="8">8×</option>
+<option value="16" selected>16×</option><option value="32">32×</option>
+</select>
+<div><button id="play">Pause</button><button id="restart">Restart</button><button id="next">Next attempt</button></div>
+<label for="scrub">Actual driving timeline</label><input id="scrub" type="range" min="0" max="1000" value="0">
+<label><input id="ghost" type="checkbox"> Show the final-driver ghost</label>
+<div class="stats">
+<div class="stat"><div class="caption">ACTUAL SPEED</div><div id="velocity" class="value"></div></div>
+<div class="stat"><div class="caption">LEARNED TARGET</div><div id="target" class="value"></div></div>
+<div class="stat"><div class="caption">GEAR / EIGHT-SPEED AUTO</div><div id="gear" class="value"></div></div>
+<div class="stat"><div class="caption">ENGINE RPM</div><div id="rpm" class="value"></div></div>
+<div class="stat"><div class="caption">LAP PROGRESS</div><div id="progress" class="value"></div></div>
+<div class="stat"><div class="caption">SIMULATED TIME</div><div id="time" class="value"></div></div>
+</div>
+<div class="gears" id="gears"></div>
+<div id="shift" class="badge"></div>
+<label>Throttle: <strong id="throttleText"></strong></label>
+<div class="bar"><div id="throttleBar" style="background:#4de2c2"></div></div>
+<label>Brake: <strong id="brakeText"></strong></label>
+<div class="bar"><div id="brakeBar" style="background:#ff5b65"></div></div>
+<p id="result"></p><p id="improvement"></p>
+<p class="note">The policy learns steering and target speed. Throttle/brake control and automatic shifting are deterministic.
+Eight gears exist; the driver need not use all eight at these speeds.</p>
+<p><a href="../index.html">All circuits</a> · <a id="movie" href="">This track’s animation</a>
+ · <a id="csv" href="">All attempt metrics</a></p>
+<p class="note">These are fictional F1-inspired cars and circuits. No real F1 powertrain, vision system or safety validation.
+Car icons are enlarged; ghosts never affect the simulation.</p>
+</aside>
+</main>
+<script id="experiment-data" type="application/json">__DATA__</script>
+<script>
+"use strict";
+const data=JSON.parse(document.getElementById("experiment-data").textContent);
+const $=id=>document.getElementById(id),canvas=$("view"),ctx=canvas.getContext("2d");
+let round=0,time=0,playing=true,last=null,endedAt=null;
+const track=data.track,xs=track.xy.map(p=>p[0]),ys=track.xy.map(p=>p[1]);
+const bounds=[Math.min(...xs)-28,Math.max(...xs)+28,Math.min(...ys)-28,Math.max(...ys)+28];
+$("title").textContent=data.circuit.name;document.title=data.circuit.name+" / Driving attempts";
+$("description").textContent=`${data.circuit.split.toUpperCase()} · four extra technical sectors · curvature reversals ${data.circuit.previous_reversals} → ${data.circuit.reversals} · 121 saved model attempts`;
+$("rolloutOption").disabled=data.rollouts.length===0;
+$("movie").href=`../visuals/track_${String(data.circuit.id).padStart(2,"0")}_attempts.gif`;
+$("csv").href=`../data/track_${String(data.circuit.id).padStart(2,"0")}_attempts.csv`;
+for(let gear=1;gear<=8;gear++){const span=document.createElement("span");span.textContent=gear;$("gears").append(span)}
+function active(){return $("mode").value==="rollout"?data.rollouts[round]:data.attempts[round]}
+function sample(trace,t){
+ let i=0;while(i+1<trace.length&&trace[i+1][0]<=t)i++;
+ const a=trace[i],b=trace[Math.min(i+1,trace.length-1)],f=b[0]===a[0]?0:Math.max(0,Math.min(1,(t-a[0])/(b[0]-a[0])));
+ const state=[...a];for(const channel of [0,1,2,4,6,7])state[channel]=a[channel]+(b[channel]-a[channel])*f;
+ const delta=((b[3]-a[3]+Math.PI)%(2*Math.PI)+2*Math.PI)%(2*Math.PI)-Math.PI;
+ state[3]=a[3]+delta*f;
+ return {state,index:i};
+}
+function drawCar(c,state,point,size,color,alpha=1){
+ c.save();c.translate(...point);c.rotate(-state[3]);c.scale(size,size);c.globalAlpha=alpha;
+ c.fillStyle="#05090f";c.strokeStyle="#9bacbf";c.lineWidth=.7;
+ for(const [x,y,w,h] of [[9,-7,2,14],[-11,-6,2,12],[4,-9,5,3],[4,6,5,3],[-9,-9,5,3],[-9,6,5,3]]){
+  c.fillRect(x,y,w,h);c.strokeRect(x,y,w,h);
+ }
+ c.beginPath();c.moveTo(12,0);c.lineTo(5,3);c.lineTo(-7,3);c.lineTo(-10,0);c.lineTo(-7,-3);c.lineTo(5,-3);c.closePath();
+ c.fillStyle=color;c.fill();c.fillStyle="#ecf2fa";c.fillRect(-3,-1.7,5,3.4);
+ c.fillStyle=state[9]>.02?"#ff5b65":"#54252a";c.fillRect(-9,-4.8,2,1.4);c.fillRect(-9,3.4,2,1.4);
+ c.restore();
+}
+function drawScene(x,y,width,height,item,t,color,title,ghost=false){
+ const [minX,maxX,minY,maxY]=bounds,pad=22,top=45;
+ const scale=Math.min((width-pad*2)/(maxX-minX),(height-top-pad)/(maxY-minY));
+ const ox=x+(width-scale*(maxX-minX))/2,oy=y+top+(height-top-scale*(maxY-minY))/2;
+ const project=p=>[ox+(p[0]-minX)*scale,oy+(maxY-p[1])*scale];
+ function path(points,closed=false){ctx.beginPath();points.forEach((p,i)=>{const q=project(p);i?ctx.lineTo(...q):ctx.moveTo(...q)});if(closed)ctx.closePath()}
+ ctx.save();ctx.beginPath();ctx.rect(x,y,width,height);ctx.clip();ctx.fillStyle="#182333";ctx.fillRect(x,y,width,height);
+ path(track.left.concat([...track.right].reverse()),true);ctx.fillStyle="#405064";ctx.fill();
+ ctx.strokeStyle="#b8c6d6";ctx.lineWidth=width>500?1.2:.6;path(track.left,true);ctx.stroke();path(track.right,true);ctx.stroke();
+ ctx.strokeStyle="#78899e";ctx.setLineDash([6,6]);path(track.xy,true);ctx.stroke();ctx.setLineDash([]);
+ ctx.strokeStyle="#ecf2fa";ctx.lineWidth=3;path([track.left[0],track.right[0]]);ctx.stroke();
+ const trace=item.trace,limit=Math.min(t,trace[trace.length-1][0]),{state,index}=sample(trace,limit);
+ path([...trace.slice(0,index+1).map(s=>[s[1],s[2]]),[state[1],state[2]]]);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();
+ const size=Math.max(.6,Math.min(1.15,width/700));
+ if(ghost){const final=data.attempts[120].trace,pose=sample(final,Math.min(t,final[final.length-1][0])).state;drawCar(ctx,pose,project([pose[1],pose[2]]),size,"#ecf2fa",.32)}
+ drawCar(ctx,state,project([state[1],state[2]]),size,color);
+ ctx.fillStyle="#ecf2fa";ctx.font=`bold ${width>500?20:14}px system-ui`;ctx.fillText(title,x+12,y+26);
+ if(width<500){ctx.font="12px system-ui";ctx.fillText(`${(state[4]*3.6).toFixed(0)} km/h  G${state[10]}  Brake ${(state[9]*100).toFixed(0)}%`,x+12,y+height-26);
+  ctx.fillText(t>=trace[trace.length-1][0]?item.metric.end_reason.replaceAll("_"," "):"driving",x+12,y+height-8)}
+ ctx.restore();return state;
+}
+function panel(c,left,right,top,bottom,title,maximum,series,trace,t,step=false){
+ c.fillStyle="#ecf2fa";c.font="bold 15px system-ui";c.fillText(title,left,top-12);
+ c.strokeStyle="#334358";c.lineWidth=1;c.beginPath();c.moveTo(left,bottom);c.lineTo(right,bottom);c.stroke();
+ const duration=trace[trace.length-1][0]||1;
+ for(const [channel,scale,color] of series){
+  c.beginPath();trace.forEach((row,i)=>{const x=left+row[0]/duration*(right-left),y=bottom-row[channel]*scale/maximum*(bottom-top);
+   if(!i)c.moveTo(x,y);else if(step){const previous=trace[i-1];c.lineTo(x,bottom-previous[channel]*scale/maximum*(bottom-top));c.lineTo(x,y)}else c.lineTo(x,y)});
+  c.strokeStyle=color;c.lineWidth=1.5;c.stroke();
+ }
+ const x=left+Math.min(t,duration)/duration*(right-left);c.strokeStyle="#ffc56b";c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();
+ c.fillStyle="#9bacbf";c.font="12px system-ui";c.fillText("0 s",left,bottom+16);c.fillText(duration.toFixed(1)+" s",right-55,bottom+16);
+}
+function drawTelemetry(item){
+ const cv=$("telemetry"),c=cv.getContext("2d"),trace=item.trace;c.clearRect(0,0,cv.width,cv.height);
+ panel(c,65,1040,38,125,"SPEED km/h: cyan actual / gray learned target",data.config.max_speed*3.6,
+  [[4,3.6,"#4de2c2"],[13,3.6,"#9bacbf"]],trace,time);
+ panel(c,65,1040,164,232,"PEDALS %: green throttle / red brake",1,[[8,1,"#4de2c2"],[9,1,"#ff5b65"]],trace,time,true);
+ panel(c,65,510,285,418,"GEAR: discrete eight-speed automatic",8,[[10,1,"#76a9ff"]],trace,time,true);
+ panel(c,625,1040,285,418,"ENGINE RPM",12000,[[11,1,"#ffc56b"]],trace,time);
+}
+function drawLearning(){
+ const cv=$("learning"),c=cv.getContext("2d");c.clearRect(0,0,cv.width,cv.height);
+ function graph(left,right,title,key,maximum,completedOnly){
+  const top=40,bottom=235;c.fillStyle="#ecf2fa";c.font="bold 16px system-ui";c.fillText(title,left,24);
+  for(let j=0;j<=4;j++){const y=bottom-j/4*(bottom-top);c.strokeStyle="#334358";c.beginPath();c.moveTo(left,y);c.lineTo(right,y);c.stroke();
+   c.fillStyle="#9bacbf";c.font="11px system-ui";c.fillText((maximum*j/4).toFixed(maximum<=5?2:0),left-42,y+4)}
+  c.beginPath();let begun=false;for(const item of data.attempts){
+   if(completedOnly&&!item.metric.completed)continue;
+   const x=left+item.round/120*(right-left),value=key==="progress"?item.metric[key]*100:item.metric[key],y=bottom-value/maximum*(bottom-top);
+   begun?c.lineTo(x,y):c.moveTo(x,y);begun=true;
+  }c.strokeStyle=key==="progress"?"#4de2c2":"#ffc56b";c.lineWidth=2;c.stroke();
+  const selected=$("mode").value==="rollout"?data.rollouts[round].model_round:round,x=left+selected/120*(right-left);
+  c.strokeStyle="#76a9ff";c.beginPath();c.moveTo(x,top);c.lineTo(x,bottom);c.stroke();
+  for(let n=0;n<=120;n+=20){c.fillStyle="#9bacbf";c.fillText(String(n),left+n/120*(right-left)-5,260)}
+ }
+ graph(60,510,"THIS TRACK / LAP PROGRESS %","progress",100,false);
+ const completed=data.attempts.filter(a=>a.metric.completed),maximum=Math.max(.1,...completed.map(a=>a.metric.mean_abs_lateral_m))*1.1;
+ graph(625,1040,"COMPLETED-LAP LANE ERROR / m","mean_abs_lateral_m",maximum,true);
+}
+function update(){
+ const mode=$("mode").value,item=active(),trace=item.trace;
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+ let state;
+ if(mode==="compare"){
+  const selected=[data.attempts[0],data.attempts[round],data.attempts[120]];
+  const labels=["UNTRAINED 0",`SELECTED ${round}`,"FINAL 120"];
+  selected.forEach((entry,i)=>{const pose=drawScene(i*366,0,364,canvas.height,entry,time,["#ff5b65","#ffc56b","#4de2c2"][i],labels[i]);if(i===1)state=pose});
+ }else state=drawScene(0,0,canvas.width,canvas.height,item,time,"#4de2c2",
+   mode==="rollout"?`COLLECTION ${item.collection_round} / MODEL ${item.model_round}`:`MODEL ATTEMPT ${round}`,
+   $("ghost").checked&&mode!=="rollout"&&round!==120);
+ $("roundKind").textContent=mode==="rollout"?"Training collection":"Saved model attempt";
+ $("roundLabel").textContent=mode==="rollout"?`${item.collection_round} (policy ${item.model_round})`:String(round);
+ $("velocity").textContent=(state[4]*3.6).toFixed(0)+" km/h";$("target").textContent=(state[13]*3.6).toFixed(0)+" km/h";
+ $("gear").textContent="G"+state[10];$("rpm").textContent=state[11].toFixed(0);
+ $("progress").textContent=(Math.min(Math.max(state[7],0),1)*100).toFixed(1)+"%";$("time").textContent=state[0].toFixed(1)+" s";
+ $("throttleText").textContent=(state[8]*100).toFixed(0)+"%";$("brakeText").textContent=(state[9]*100).toFixed(0)+"%";
+ $("throttleBar").style.width=state[8]*100+"%";$("brakeBar").style.width=state[9]*100+"%";
+ [...$("gears").children].forEach((span,i)=>span.classList.toggle("active",i+1===state[10]));
+ $("shift").textContent=state[16]?"SHIFT / TORQUE INTERRUPTED":"";
+ const duration=trace[trace.length-1][0];$("scrub").value=Math.round(Math.min(time,duration)/duration*1000);
+ if(mode==="rollout"){
+  $("result").textContent=`First continuous training episode: ${item.end_reason.replaceAll("_"," ")}. ${item.labeled_states} total labeled states in this collection round.`;
+  $("sourceCaption").textContent="ACTUAL TRAINING DATA: randomized starts, first continuous episode only. Resets are never joined into a fake driving segment.";
+ }else{
+  const metric=item.metric,finished=time>=duration;
+  $("result").textContent=(finished?"End of saved drive: ":"Saved outcome: ")+metric.end_reason.replaceAll("_"," ")+
+   ` / ${(metric.progress*100).toFixed(1)}% / ${metric.completed?"full lap "+metric.lap_time_s.toFixed(1)+" s":"not completed"}`;
+  $("sourceCaption").textContent="FIXED TEST ATTEMPTS: identical start and no teacher interventions. The moving car follows each saved model’s actual simulation. Unseen attempts were tested after training.";
+ }
+ const first=data.attempts.find(a=>a.metric.completed),final=data.attempts[120].metric;
+ $("improvement").textContent=first&&final.completed?
+  `First completed attempt ${first.round}: lane error ${first.metric.mean_abs_lateral_m.toFixed(3)} m → final ${final.mean_abs_lateral_m.toFixed(3)} m. Raw regressions are retained.`:
+  "Completion and quality are recorded separately; failed short drives are not compared as full laps.";
+ drawTelemetry(item);drawLearning();
+}
+function reset(){round=+$("round").value;time=0;last=null;endedAt=null;update()}
+$("round").addEventListener("input",reset);
+$("mode").addEventListener("change",()=>{
+ const rollout=$("mode").value==="rollout";$("round").max=rollout?119:120;
+ if(rollout)$("round").value=Math.min(+$("round").value,119);
+ if($("mode").value==="compare"&&+$("round").value===0)$("round").value=data.early_round;
+ reset();
+});
+$("play").addEventListener("click",()=>{playing=!playing;$("play").textContent=playing?"Pause":"Play";last=null});
+$("restart").addEventListener("click",()=>{reset();playing=true;$("play").textContent="Pause"});
+$("next").addEventListener("click",()=>{$("round").value=Math.min(+$("round").max,round+1);reset()});
+$("scrub").addEventListener("input",()=>{const trace=active().trace;time=+$("scrub").value/1000*trace[trace.length-1][0];endedAt=null;update()});
+$("ghost").addEventListener("change",update);
+const table=$("attemptTable");
+table.innerHTML="<thead><tr><th>Attempt</th><th>Outcome</th><th>Progress</th><th>Lap s</th><th>Lane error m</th><th>Peak km/h</th><th>Brake s</th><th>Gear changes</th></tr></thead>";
+const tbody=document.createElement("tbody");
+for(const attempt of data.attempts){const m=attempt.metric,tr=document.createElement("tr");
+ for(const value of [attempt.round,m.end_reason,(m.progress*100).toFixed(1)+"%",m.completed?m.lap_time_s.toFixed(1):"—",
+  m.completed?m.mean_abs_lateral_m.toFixed(3):"—",m.peak_speed_kmh.toFixed(0),m.braking_time_s.toFixed(1),m.gear_changes]){
+  const td=document.createElement("td");td.textContent=value;tr.append(td)
+ }tbody.append(tr);
+}table.append(tbody);
+function tick(now){
+ if(last!==null&&playing){
+  const delta=Math.min((now-last)/1000,.1),item=active();
+  const duration=$("mode").value==="compare"?Math.max(...[data.attempts[0],data.attempts[round],data.attempts[120]].map(a=>a.trace.at(-1)[0])):item.trace.at(-1)[0];
+  time=Math.min(duration,time+delta*+$("speed").value);update();
+  if($("mode").value==="sequence"&&time>=duration&&round<120){
+   if(endedAt===null)endedAt=now;
+   else if(now-endedAt>900){$("round").value=round+1;reset()}
+  }
+ }last=now;requestAnimationFrame(tick);
+}
+reset();requestAnimationFrame(tick);
+</script></body></html>
