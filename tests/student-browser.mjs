@@ -457,8 +457,11 @@ try {
   await page.goto(pathToFileURL(path.join(output, "teacher_guide.html")).href);
   check("teacher_guide_lists_every_objective_and_rubric_criterion", await page.evaluate(([objectives, criteria]) => objectives.every(o => document.body.innerText.includes(o)) && criteria.every(c => document.body.innerText.includes(c)),
     [kit.objectives.map(o => o.id), kit.rubric.criteria.map(c => c.name)]));
+  // The PDF is a print copy: left alone, the guide's links to the lab pages are saved as file:// URLs that name this machine's folders and work nowhere else.
+  await page.evaluate(() => document.querySelectorAll("a[href]").forEach(a => { if (!/^(https?|mailto):/i.test(a.getAttribute("href"))) a.removeAttribute("href"); }));
   await page.pdf({ path: path.join(output, "teacher_guide.pdf"), format: "A4", printBackground: false, margin: { top: "12mm", bottom: "12mm", left: "10mm", right: "10mm" } });
   check("teacher_guide_pdf_written", (await fs.stat(path.join(output, "teacher_guide.pdf"))).size > 5000);
+  check("teacher_guide_pdf_names_no_local_path", !(await fs.readFile(path.join(output, "teacher_guide.pdf"))).includes("file://"));
 
   const dashboard = await browser.newPage({ viewport: { width: 1300, height: 1000 }, acceptDownloads: true });
   dashboard.on("pageerror", e => errors.push(`dashboard: ${e.message}`));
