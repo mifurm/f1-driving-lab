@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Student ML Driving Laboratory</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101722;color:#ecf2fa;font:15px system-ui}
+header,main{max-width:1560px;margin:auto;padding:20px}h1{margin:10px 0}h2{font-size:23px}h3{font-size:18px}
+p{color:#acbbce;line-height:1.55}.badge{font-weight:bold;color:#ffc56b}.layout{display:grid;grid-template-columns:250px 1fr;gap:20px}
+nav{align-self:start;position:sticky;top:10px}nav button{display:block;width:100%;text-align:left;margin-bottom:8px}
+button,select,input,textarea{font:inherit;color:#ecf2fa;background:#182333;border:1px solid #536780;border-radius:7px;padding:9px}
+button{cursor:pointer;border-color:#4de2c2;margin:6px 6px 6px 0}button:disabled{opacity:.5;cursor:wait}button.active{background:#284c46}
+button.secondary{border-color:#76a9ff}button.danger{border-color:#ff8990}
+label{display:block;color:#acbbce;margin:12px 0 6px}input[type=range]{width:100%;padding:0;accent-color:#4de2c2}
+input[type=checkbox]{width:auto;margin-right:6px}
+textarea{width:100%;min-height:75px}canvas{width:100%;background:#182333;border:1px solid #334358;border-radius:12px}
+.panel{padding:18px;background:#182333;border:1px solid #334358;border-radius:12px;margin-top:18px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.controls{display:flex;gap:14px;flex-wrap:wrap}.controls label{margin-top:0}.note{font-size:12px}.good{color:#4de2c2}.warning{color:#ffc56b}
+#error{color:#ff8990;white-space:pre-wrap}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:8px;border-bottom:1px solid #334358;text-align:left;vertical-align:top}
+.table{max-height:380px;overflow:auto}.numbers{font:14px ui-monospace,monospace;white-space:pre-wrap}.stage{border-left:4px solid #4de2c2;padding:12px;margin:10px 0}
+.quiz label{display:block;margin:4px 0}.quizitem{margin:14px 0;padding:10px;border-left:3px solid #334358}.quizitem.right{border-color:#4de2c2}.quizitem.wrong{border-color:#ff8990}
+a{color:#4de2c2}[hidden]{display:none!important}details{margin-top:12px}summary{cursor:pointer;color:#ffc56b}
+.pill{display:inline-block;padding:2px 9px;border:1px solid #536780;border-radius:99px;font-size:12px;color:#acbbce;margin-right:6px}
+.pill.exploratory{border-color:#ffc56b;color:#ffc56b}.pill.legacy{border-color:#ff8990;color:#ff8990}
+.legend span{margin-right:14px;font-size:12px}.legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:6px}
+@media(max-width:850px){.layout{grid-template-columns:1fr}nav{position:static;display:flex;flex-wrap:wrap}nav button{width:auto}.grid,.grid3{grid-template-columns:1fr}}
+@media print{nav,.controls,button,#view,#replayControls,canvas{display:none}.layout{display:block}.panel{break-inside:avoid}body{background:white;color:black}p,label{color:black}}
+</style></head><body><header><div class="badge">ELEVEN HANDS-ON LESSONS / REAL SIMULATION AND REAL LEARNING</div>
+<h1>Student Machine Learning Driving Lab</h1><p>Predict, collect examples, update weights, test your hypotheses and find out why imitation learning is hard.
+Runs locally without a server; nothing is uploaded. The neural network learns steering and target speed; ordinary controllers produce pedals and gears.</p>
+<p><a href="teacher_guide.html">Teacher guide, rubric and printable worksheets</a> · <a href="class_dashboard.html">Class dashboard (teacher)</a> · <a href="training_deck.html">Classroom presentation</a></p></header>
+<main class="layout"><nav aria-label="Eleven learning modules">
+<button id="tabPredict" data-module="predict" class="active">1. Predict before moving</button>
+<button id="tabDataset" data-module="dataset">2. Build a dataset and train</button>
+<button id="tabStep" data-module="step">3. One training step</button>
+<button id="tabControllers" data-module="controllers">4. Rules versus learning</button>
+<button id="tabFeatures" data-module="features">5. Remove inputs and retrain</button>
+<button id="tabPlayground" data-module="playground">6. Training playground</button>
+<button id="tabCoverage" data-module="coverage">7. Data coverage and DAgger</button>
+<button id="tabDiagnose" data-module="diagnose">8. Diagnose a failure</button>
+<button id="tabGeneralization" data-module="generalization">9. Generalization and leakage</button>
+<button id="tabRobustness" data-module="robustness">10. Robustness challenges</button>
+<button id="tabWorksheets" data-module="worksheets">11. Guided experiments</button>
+</nav><div>
+<div class="controls">
+<div><label for="track">Track</label><select id="track"></select></div>
+<div><label for="scenario">Starting challenge</label><select id="scenario"></select></div>
+<div><label for="model">Policy</label><select id="model"><option value="pretrained">Pretrained wall-aware driver</option><option value="student">Your student model</option>
+<option value="ridge" disabled>Linear baseline (train in module 6)</option><option value="knn" disabled>Nearest-neighbour baseline (train in module 6)</option></select></div>
+<div><label for="camera">Camera</label><select id="camera"><option value="follow">Close-up following</option><option value="overview">Whole circuit</option></select></div>
+</div>
+<p id="testExposure" class="warning">Three new test circuits are sealed by classroom protocol (not secrecy). Legacy holdouts are not pristine.</p>
+<p id="legacyNote" class="note"></p>
+<canvas id="view" width="1100" height="620" aria-label="Fictional car with moving steering wheels, footprint and track walls"></canvas>
+<div id="replayControls"><button id="replayPlay">Play replay</button><label for="replayTime">Recorded live-simulation timeline</label>
+<input id="replayTime" type="range" min="0" max="1000" value="0"><p id="telemetry" class="numbers"></p></div>
+<p id="status" role="status">Ready. Pick a lesson.</p><button id="cancelRun" class="danger" hidden>Cancel the running experiment</button><div id="error" role="alert"></div>
+
+<section id="predict" class="panel">
+<h2>1. Predict before the car moves</h2><p>Change one input. Guess the steering direction and whether the speed controller will brake.
+Then reveal the actual network output and simulate its unassisted drive.</p>
+<div class="grid"><div>
+<label for="startSpeed">Starting speed: <strong id="startSpeedLabel"></strong></label><input id="startSpeed" type="range" min="10" max="100" step="1">
+<label for="startLateral">Lane offset: <strong id="startLateralLabel"></strong></label><input id="startLateral" type="range" min="-7" max="7" step=".1">
+<label for="startHeading">Heading error: <strong id="startHeadingLabel"></strong></label><input id="startHeading" type="range" min="-30" max="30" step="1">
+<label for="guessDirection">Your steering prediction</label><select id="guessDirection"><option value="">Choose first</option><option value="left">Left (+)</option><option value="straight">Nearly straight</option><option value="right">Right (-)</option></select>
+<label for="guessBrake">Will the controller brake?</label><select id="guessBrake"><option value="">Choose first</option><option value="yes">Yes</option><option value="no">No</option></select>
+<button id="revealPrediction">Reveal prediction and drive</button><p id="predictionResult" hidden></p><p id="guessFeedback"></p>
+</div><div><h3>What the policy can observe</h3><p class="note">Actual 18 input values, not a claim about neuron reasoning or learned attention.</p>
+<div class="table"><table id="inputTable"></table></div></div></div>
+</section>
+
+<section id="dataset" class="panel" hidden>
+<h2>2. Build your training dataset and watch it learn</h2>
+<p>Use A/D or the steering controls and W/S for target speed. Capture the inputs <em>before</em> each action. Split entire driving episodes, never neighbouring
+frames, and never reuse the same start in both splits. Labels are your commands, not reward scores.</p>
+<div class="panel"><strong>Three kinds of example, three different questions</strong>
+<p class="note"><span class="pill">Training</span> fits the weights. <span class="pill">Validation</span> comes from <em>different episodes of the same sampler</em>, so it measures generalisation to
+similar drives. <span class="pill exploratory">Stress</span> is a deliberately different distribution (deep recovery starts): it is evaluation only and never used to train or to select a checkpoint.
+A high stress loss next to a low validation loss shows missing coverage, not overfitting.</p></div>
+<div class="grid"><div>
+<label for="recordSplit">New episode split</label><select id="recordSplit"><option value="train">Training</option><option value="validation">Validation (a separate drive)</option></select>
+<label><input id="expertRecording" type="checkbox"> Let the expert drive and label this episode (clearly marked)</label>
+<label for="manualSteer">Commanded steering (degrees)</label><input id="manualSteer" type="range" min="-28" max="28" step="1" value="0">
+<label for="manualTarget">Commanded target speed (km/h)</label><input id="manualTarget" type="range" min="0" max="100" step="1" value="35">
+<button id="newDrive">New driving episode</button><button id="recordPlay">Record live drive</button><button id="recordStep">Capture one step</button>
+<button id="steerLeft">Left</button><button id="steerCenter">Center</button><button id="steerRight">Right</button>
+<p id="episodeStatus"></p>
+</div><div>
+<button id="loadStarter">Load starter expert episodes (train + validation) and the stress set</button>
+<button id="clearDataset">Clear examples</button><button id="downloadDataset">Download dataset JSON</button>
+<button id="downloadCSV">Download spreadsheet CSV</button>
+<label for="importDataset">Import your dataset JSON</label><input id="importDataset" type="file" accept=".json,application/json">
+<p id="datasetCounts" class="numbers"></p>
+<label for="studentSeed">Model seed</label><input id="studentSeed" type="number" value="7" step="1">
+<label for="learningRate">Adam learning rate</label><input id="learningRate" type="number" value=".001" min=".00001" max=".05" step=".0001">
+<label for="updates">Training updates (1–400)</label><input id="updates" type="number" value="80" min="1" max="400">
+<label for="studentMask">Inputs used during training and inference</label><select id="studentMask"><option value="full">All inputs</option><option value="no_future_geometry">No future geometry</option><option value="no_heading">No direct heading / derived margin</option><option value="no_margin">No projected margin</option></select>
+<label for="monitorEvery">Closed-loop monitor</label><select id="monitorEvery"><option value="0">Off</option><option value="10">Every 10 updates</option><option value="20" selected>Every 20 updates</option><option value="40">Every 40 updates</option></select>
+<button id="trainStudent">Train a fresh student model</button><button id="exportModel">Download trained model</button><p id="studentTraining"></p>
+</div></div>
+<div class="legend"><span><i style="background:#4de2c2"></i>training loss</span><span><i style="background:#ffc56b"></i>validation loss (same distribution)</span><span><i style="background:#ff8990"></i>stress loss (different distribution)</span></div>
+<canvas id="lossCanvas" width="1100" height="270" aria-label="Actual training, validation and stress losses against optimizer updates"></canvas>
+<div class="legend"><span><i style="background:#76a9ff"></i>nominal sections completed safely</span><span><i style="background:#be9cff"></i>recovery sections completed safely</span></div>
+<canvas id="probeCanvas" width="1100" height="230" aria-label="Closed-loop successes of the current weights on fixed monitor sections against optimizer updates"></canvas>
+<p id="probeNote" class="note">The closed-loop monitor drives the current weights through 16 fixed development sections (valid tracks only). Each point is an exact count for those sections, not a random sample:
+it carries no confidence interval. Watching it while tuning makes later results exploratory.</p>
+<button id="animateStudentLearning">Replay actual before / intermediate / after training</button>
+<label for="learningUpdate">Intermediate saved update</label><input id="learningUpdate" type="range" min="0" max="0" value="0">
+<p id="learningReplayStatus"></p>
+<div class="table"><table id="datasetTable"></table></div>
+</section>
+
+<section id="step" class="panel" hidden>
+<h2>3. Inspect one real training step</h2><p>This performs a genuine minibatch update on your student network.
+Adam uses gradient history: the update is not simply minus learning rate times gradient.</p>
+<button id="inspectStep">Compute and apply one minibatch update</button><button id="stepNext">Explain the next stage</button>
+<button id="driveAfterStep">Drive those exact before/after weights</button>
+<p id="stepStage" class="stage">Load or capture examples first.</p><p id="stepLoss" class="numbers"></p>
+<h3>Actual minibatch inputs, predictions and errors</h3><p class="note">Steering and target-speed labels/predictions are normalized to [-1,1].
+The mean of the displayed weighted per-example errors is the minibatch loss.</p>
+<div class="table"><table id="batchTable"></table></div>
+<canvas id="activationCanvas" width="1100" height="270" aria-label="Actual activations of input hidden and output neurons"></canvas>
+<div class="table"><table id="weightTable"></table></div><p id="gradientCheck" class="numbers"></p>
+<p class="note">The displayed weights are selected by gradient magnitude. They are not a causal explanation of the car's decisions.
+Loss can increase on a step; the values here are measured, not scripted improvements.</p>
+</section>
+
+<section id="controllers" class="panel" hidden>
+<h2>4. Rules versus learning</h2><p>Compare a fixed lane/heading rule, a pure-pursuit expert and your selected neural policy. Every controller sees the same starts and noise streams.
+Failures freeze at their endpoint; a short failed run is not a fast lap.</p>
+<div class="grid3"><div><label for="controllerPool">Section pool</label><select id="controllerPool">
+<option value="monitor">16 fixed monitor sections</option><option value="all">36 fixed sections on all valid training tracks</option><option value="selected">Only the selected start (perturbations of one section)</option>
+<option value="typical">24 independent random typical starts</option><option value="stress">24 independent random stress starts</option></select></div>
+<div><label for="controllerSeeds">Paired perturbation seeds per section</label><select id="controllerSeeds"><option value="1">1 (one trial per start; Wilson interval for random pools)</option><option value="3">3 (exploratory)</option><option value="5">5</option><option value="10" selected>10</option></select></div>
+<div><button id="compareControllers">Run three controllers</button><button id="downloadComparison">Download comparison report</button></div></div>
+<p class="note" id="statsNote">Statistics: trials inside a fixed section share a track and a start family, so the <strong>section</strong> is the unit of replication. Intervals are percentile bootstrap
+intervals over sections; comparisons are paired by section with an exact sign test. A Wilson interval is shown only for independent random starts with one trial each. With few sections, treat everything as exploratory.</p>
+<div class="table"><table id="controllerTable"></table></div>
+<details><summary>Outcome of every section</summary><div class="table"><table id="controllerSections"></table></div></details>
+<details><summary>Measured Python reference experiment (ten paired seeds, all tracks)</summary><div class="table"><table id="referenceControllers"></table></div></details>
+</section>
+
+<section id="features" class="panel" hidden>
+<h2>5. Remove inputs and retrain</h2><p>All variants start from scratch with the same architecture, examples, batch schedule and update budget.
+Inputs are removed during both fitting and driving, not just switched off on a pretrained model.</p>
+<p class="note">“No future geometry” removes all previews and explicit curvature. “No heading” removes heading channels and the derived margin,
+but geometric previews can still encode orientation. “No margin” retains lane/heading information from which margin can be inferred.
+The replication unit here is the <strong>training seed</strong>: each dot is one independently trained network; the bar is the mean with a percentile bootstrap interval over seeds. Fewer than ten seeds is exploratory.</p>
+<div class="grid3"><div><label for="ablationSeeds">Training seeds per variant</label><select id="ablationSeeds"><option value="3">3 (exploratory)</option><option value="5">5 (exploratory)</option><option value="10" selected>10</option></select></div>
+<div><label for="ablationPool">Evaluation sections</label><select id="ablationPool"><option value="monitor">16 fixed monitor sections</option><option value="all">36 fixed sections, valid training tracks</option>
+<option value="stress">24 independent random stress starts</option></select></div>
+<div><button id="localAblation">Retrain four variants on your dataset</button><button id="animateReferenceLearning">Drive saved reference updates 0 / 128 / validation-selected final</button></div></div>
+<p id="ablationStatus"></p>
+<label><input id="includeLegacy" type="checkbox"> Include the two legacy-geometry tracks (Apex Park, Square Sprint) in the reference table</label>
+<h3>Your retraining</h3>
+<div class="table"><table id="ablationTable"></table></div>
+<canvas id="ablationCanvas" width="1100" height="300" aria-label="Per-seed success of each input variant retrained on your dataset, with mean and bootstrap interval"></canvas>
+<h3>Reference retraining (NumPy, ten seeds)</h3>
+<p id="referenceAblationNote" class="note"></p>
+<div class="table"><table id="referenceAblationTable"></table></div>
+<canvas id="referenceAblationCanvas" width="1100" height="300" aria-label="Per-seed success of each input variant in the reference experiment, with mean and bootstrap interval"></canvas>
+<details open><summary>Reference training curves: loss against closed-loop driving, ten seeds</summary>
+<canvas id="referenceCurves" width="1100" height="280" aria-label="Reference validation loss and closed-loop recovery success against updates for ten seeds"></canvas>
+<div class="table"><table id="ablationHistories"></table></div></details>
+</section>
+
+<section id="playground" class="panel" hidden>
+<h2>6. Training playground: capacity, regularisation and baselines</h2>
+<p>Change how the model is built and trained, then compare train, validation and stress loss with closed-loop driving over several seeds. Uses your dataset from module 2
+(load the starter set first). Every configuration is trained from scratch for each seed.</p>
+<div class="grid3">
+<div><label for="playModel">Model family</label><select id="playModel"><option value="mlp">Neural network (tanh MLP, Adam)</option><option value="ridge">Linear regression baseline (ridge)</option><option value="knn">Nearest-neighbour baseline</option></select>
+<label for="hidden1">Hidden layer 1 size</label><select id="hidden1"><option>4</option><option>8</option><option>16</option><option selected>24</option><option>48</option><option>64</option></select>
+<label for="hidden2">Hidden layer 2 size</label><select id="hidden2"><option>4</option><option>8</option><option selected>16</option><option>32</option><option>64</option></select>
+<label for="trainSize">Training examples used</label><select id="trainSize"><option value="24">24 (tiny)</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="all" selected>All loaded</option></select></div>
+<div><label for="playBatch">Batch size</label><select id="playBatch"><option>16</option><option selected>64</option><option>128</option></select>
+<label for="playRate">Learning rate</label><input id="playRate" type="number" value=".002" min=".00001" max=".05" step=".0005">
+<label for="playSchedule">Learning-rate schedule</label><select id="playSchedule"><option value="constant">Constant</option><option value="linear">Linear decay to 10%</option><option value="cosine">Cosine decay to 10%</option><option value="step">Halve at one third and two thirds</option></select>
+<label for="playUpdates">Updates</label><input id="playUpdates" type="number" value="200" min="10" max="800" step="10"></div>
+<div><label for="playDecay">Weight decay (AdamW style, weights only)</label><input id="playDecay" type="number" value="0" min="0" max="1" step=".01">
+<label for="playClip">Gradient-norm limit (0 = off)</label><input id="playClip" type="number" value="0" min="0" step=".1">
+<label for="playPatience">Early stopping patience (evaluations; 0 = off)</label><input id="playPatience" type="number" value="0" min="0" max="50">
+<label for="playNoise">Corrupt training steering labels (σ, normalized units)</label><input id="playNoise" type="number" value="0" min="0" max="1" step=".05">
+<label for="playSeeds">Seeds</label><select id="playSeeds"><option value="3">3 (exploratory)</option><option value="5" selected>5 (exploratory)</option><option value="10">10</option></select></div></div>
+<button id="runPlayground">Train this configuration</button><button id="presetOverfit" class="secondary">Preset: overfitting demo</button><button id="presetRegularize" class="secondary">Preset: regularise it</button>
+<button id="presetBaselines" class="secondary">Preset: compare with linear and nearest-neighbour</button>
+<label for="sweepParameter">Sweep one parameter</label><select id="sweepParameter"><option value="hidden">Hidden sizes (4, 24, 64)</option><option value="decay">Weight decay (0, 0.05, 0.3)</option><option value="rate">Learning rate (0.0005, 0.002, 0.01)</option>
+<option value="size">Training examples (24, 64, all)</option><option value="updates">Updates (50, 200, 600)</option><option value="noise">Label noise (0, 0.15, 0.4)</option></select>
+<button id="runSweep">Run the sweep</button>
+<p id="playStatus"></p>
+<div class="legend"><span><i style="background:#4de2c2"></i>training loss</span><span><i style="background:#ffc56b"></i>validation loss</span><span><i style="background:#ff8990"></i>stress loss</span><span>shaded: ± one sample SD over seeds</span></div>
+<canvas id="playCanvas" width="1100" height="300" aria-label="Mean loss curves over seeds for the trained configuration"></canvas>
+<div class="table"><table id="playTable"></table></div>
+<p class="note">Loss values are the weighted action error on recorded states. Closed-loop success uses the 16 fixed development sections: an exact count per seed, summarised over seeds with a bootstrap interval.
+Label corruption adds Gaussian noise to the <em>training</em> steering labels only; validation and stress labels stay clean. Training loss is then measured against the noisy labels, so it contains a noise floor, and a network that
+does not memorise the noise can show validation loss <em>below</em> training loss (a negative gap). With few, clean, near-centreline examples a large network may not overfit at all: try label noise, then compare early stopping and weight decay.</p>
+</section>
+
+<section id="coverage" class="panel" hidden>
+<h2>7. Data coverage and DAgger</h2>
+<p>Where should the training examples come from? Four recipes get the same labelled-state budget per track and the same number of Adam updates. <strong>Narrow</strong> copies the expert from near-centreline starts;
+<strong>broad</strong> copies it from broader starts; <strong>staged expert</strong> follows DAgger's schedule and start distribution but the expert drives; <strong>DAgger</strong> lets the learner drive and the expert relabel the states it visits.
+Differences describe whole recipes. Only the comparison with the staged control isolates who chooses the visited states.</p>
+<div class="grid3"><div><label>Recipes</label>
+<label><input type="checkbox" id="armBcNarrow" checked> Narrow expert demonstrations</label><label><input type="checkbox" id="armBcBroad" checked> Broad expert demonstrations</label>
+<label><input type="checkbox" id="armBcStaged" checked> Staged expert control</label><label><input type="checkbox" id="armDagger" checked> DAgger</label></div>
+<div><label for="covBudget">Labelled states per track per round</label><select id="covBudget"><option>50</option><option selected>100</option><option>200</option></select>
+<label for="covRounds">DAgger rounds after the first</label><select id="covRounds"><option>2</option><option selected>4</option><option>6</option></select>
+<label for="covUpdates">Updates per round</label><select id="covUpdates"><option>60</option><option selected>120</option></select></div>
+<div><label for="covSeeds">Seeds</label><select id="covSeeds"><option value="3">3 (exploratory)</option><option value="5" selected>5 (exploratory)</option><option value="10">10</option></select>
+<button id="runCoverage">Run the experiment</button><button id="startDagger" class="secondary">Step-by-step DAgger session</button></div></div>
+<p id="covStatus"></p>
+<div class="table"><table id="coverageTable"></table></div>
+<div class="table"><table id="coveragePairs"></table></div>
+<canvas id="coverageDots" width="1100" height="300" aria-label="Per-seed success for every data recipe"></canvas>
+<p class="note">Each dot is one seed (one independently trained network) evaluated on fixed sections: nominal and recovery sections are reported separately because pooling hides which regime a recipe fails.
+<strong>Projected occupancy</strong> is the share of states in a cell of (offset, heading error, speed, curvature) holding at least 3 examples from at least 2 distinct episodes. It ignores the road previews and previous steering; it is a diagnostic, not a guarantee.
+“Reference states” are the states the expert itself drives through on the same sections (independent of the learner); “visited states” are the learner's own, so crashed runs contribute fewer states.</p>
+<canvas id="coverageMaps" width="1100" height="320" aria-label="Where each recipe's training examples lie compared with the states the expert drives through"></canvas>
+<details id="coverageReferenceBox" hidden><summary>Reference run: the same experiment with ten seeds</summary>
+<p id="coverageReferenceNote" class="note"></p>
+<div class="table"><table id="coverageReferenceTable"></table></div><div class="table"><table id="coverageReferencePairs"></table></div>
+<canvas id="coverageReferenceDots" width="1100" height="300" aria-label="Per-seed success for every data recipe in the saved reference run"></canvas></details>
+<details open><summary>Step-by-step DAgger session</summary>
+<p>Round 0 collects expert demonstrations and trains. Each round then lets <em>your current network drive</em> while the expert labels every state it visits, adds those labelled states and retrains.
+Validation here is a fixed set of expert episodes (not the growing buffer), so its curve stays comparable between rounds.</p>
+<button id="daggerRollout" disabled>Let the learner drive and the expert label</button><button id="daggerTrain" disabled>Add the labelled states and retrain</button><button id="daggerReplay" disabled>Replay the learner's first drive</button>
+<p id="daggerStatus" class="numbers"></p><div class="table"><table id="daggerTable"></table></div></details>
+</section>
+
+<section id="diagnose" class="panel" hidden>
+<h2>8. Diagnose a failure</h2>
+<p>Run the selected policy from the selected start while recording what it did <em>and what the expert would have done at the same true state</em>. Then ask where they first part ways, whether the expert could
+still have recovered from that state, and which inputs the policy relies on.</p>
+<div class="grid3"><div><button id="diagnoseRun">Run and record this start</button>
+<label for="divergeThreshold">Disagreement threshold (weighted action error)</label><input id="divergeThreshold" type="range" min="2" max="100" value="20"><p id="divergeLabel" class="note"></p></div>
+<div><button id="recoveryRun" class="secondary">Expert recovery from this state</button><p class="note">Forks the recorded drive at evenly spaced times and lets the expert finish from that exact state (steering, drivetrain, clock and exit window preserved).
+It is a counterfactual about a state; it does not prove which earlier action caused the failure, and the outcomes need not switch only once.</p></div>
+<div><button id="importanceRun" class="secondary">Permutation importance</button>
+<label for="importanceSet">Rows to scramble</label><select id="importanceSet"><option value="validation">Validation (same distribution)</option><option value="stress">Stress (different distribution)</option></select></div></div>
+<p id="diagnoseSummary" class="numbers"></p>
+<canvas id="overlayCanvas" width="1100" height="320" aria-label="Policy and expert steering and target speed over time with the first divergence marked"></canvas>
+<div class="table"><table id="recoveryTable"></table></div>
+<canvas id="importanceCanvas" width="1100" height="300" aria-label="Increase in loss when each input group is scrambled"></canvas>
+<div class="table"><table id="importanceTable"></table></div>
+<p class="note">Permutation importance scrambles an input group across examples (the wall margin and steering budget are recomputed from the scrambled base inputs, so examples stay physically consistent) and measures how much the loss rises.
+Correlated inputs share credit, and the five repeats measure shuffle variability only, not population certainty. Corroborate with the retrained input-removal experiment in module 5.</p>
+</section>
+
+<section id="generalization" class="panel" hidden>
+<h2>9. Generalization and evaluation leakage</h2><p>Training uses the eleven existing training circuits. Three newly generated circuits were withheld from every clean
+reference model until all weights and validation-based selections were frozen. Legacy holdouts have already been seen in earlier work.
+<strong>The seal is a classroom protocol, not secrecy:</strong> this page embeds those circuits, so a blind claim needs a teacher-controlled fresh test pack (below).</p>
+<button id="freezeReveal">Freeze current model, then reveal the three sealed test circuits</button><p id="freezeStatus"></p>
+<div class="table"><table id="testTable"></table></div>
+<p class="note">Three circuits (twelve fixed sections) do not support a statement about circuits in general. The table shows each section.</p>
+<h3>Teacher-controlled fresh test pack</h3><p class="note">Your teacher can generate a pack with <code>tools/make_fresh_pack.py --seed &lt;secret&gt;</code> and hand it out only after you freeze your model.
+The pack's fingerprint can be announced beforehand. Load it here to evaluate the frozen model once.</p>
+<label for="freshPack">Fresh test pack (JSON)</label><input id="freshPack" type="file" accept=".json,application/json"><button id="evaluateFresh" disabled>Evaluate the frozen model on the pack</button><p id="freshStatus"></p>
+<div class="table"><table id="freshTable"></table></div>
+<h3>Deliberately break the rule, only as a lesson</h3><p>A separate model clone can train on the very test labels it is scored against.
+The resulting number is explicitly contaminated and cannot support a generalization claim.</p>
+<button id="demonstrateLeak" disabled>Train a separate clone on exposed test labels (INVALID benchmark)</button><p id="leakStatus" class="warning"></p>
+<div class="table"><table id="leakTable"></table></div>
+<p class="note">Once you reveal or reuse a test set, retraining is exploratory. Clearing examples does not erase test exposure.</p>
+</section>
+
+<section id="robustness" class="panel" hidden>
+<h2>10. Robustness and distribution shift</h2><p>Keep the driver and starts fixed; alter observations or the plant.
+Delayed inputs are genuinely old observations. Noise affects lane, heading and speed sensors; ideal previews remain unchanged. This <em>measures</em> robustness to a shift the model never trained for; it does not make the model robust.</p>
+<div class="grid3"><div>
+<label for="noise">Noise multiplier (1 = 1 m offset, 0.05 rad heading, 0.6 m/s speed standard deviation)</label><input id="noise" type="number" value="1" min="0" max="3" step=".1">
+<label for="delay">Observation delay (0.1 s per step)</label><input id="delay" type="number" value="3" min="0" max="20" step="1">
+<label for="grip">Grip multiplier</label><input id="grip" type="number" value=".65" min=".2" max="1.2" step=".05"></div>
+<div><label for="robustPool">Section pool</label><select id="robustPool"><option value="monitor">16 fixed monitor sections</option><option value="all">36 fixed sections on valid training tracks</option><option value="selected">Only the selected start</option>
+<option value="typical">24 independent random typical starts</option><option value="stress">24 independent random stress starts</option></select>
+<label for="robustSeeds">Paired noise seeds per section</label><select id="robustSeeds"><option value="1">1 (one trial per start; Wilson interval for random pools)</option><option value="3">3 (exploratory)</option><option value="5">5</option><option value="10" selected>10</option></select></div>
+<div><button id="runRobustness">Compare clean and shifted conditions</button><button id="downloadRobustness">Download robustness report</button>
+<p class="note">Grip scales the lateral-acceleration limit and available braking. It is a hard threshold, not tyre slip, so failures are abrupt. The policy does not receive a grip measurement.
+Random streams are reproducible within each runtime, but browser RNG is not NumPy's RNG.</p></div></div>
+<div class="table"><table id="robustnessTable"></table></div>
+<details><summary>Five-condition Python reference results (ten paired seeds)</summary><div class="table"><table id="referenceRobustness"></table></div></details>
+</section>
+
+<section id="worksheets" class="panel" hidden>
+<h2>11. Guided scientific experiments</h2>
+<label for="worksheet">Choose a worksheet</label><select id="worksheet"></select><p id="worksheetPrompt"></p><p id="worksheetObjectives" class="note"></p>
+<label for="hypothesis">Your hypothesis (write before running)</label><textarea id="hypothesis"></textarea>
+<div id="worksheetControls" class="controls"></div>
+<button id="runWorksheet">Run the worksheet experiment</button><div class="table"><table id="worksheetResults"></table></div>
+<label for="evidence">What evidence supports or contradicts your prediction?</label><textarea id="evidence"></textarea>
+<label for="conclusion">Conclusion and limitations</label><textarea id="conclusion"></textarea>
+<button id="exportWorksheet">Download worksheet with settings, seeds and raw results</button><button id="printWorksheet">Print worksheet</button>
+<h3>Concept check with feedback</h3><label for="quizPhase">When are you taking this quiz?</label><select id="quizPhase"><option value="pre">Before the lessons</option><option value="post">After the lessons</option></select>
+<div id="quiz" class="quiz"></div><button id="gradeQuiz">Check answers</button><p id="quizFeedback"></p><div id="quizReview"></div>
+<h3>Results card for your teacher</h3><p class="note">A small JSON file with which modules you visited, quiz scores per objective and the misconceptions your wrong answers pointed to. It has no free text, no timestamps and nothing identifying beyond the optional nickname you type.
+Nothing is sent anywhere: you download it and hand it in.</p>
+<label for="nickname">Optional nickname (up to 20 characters)</label><input id="nickname" maxlength="20" autocomplete="off"><button id="downloadCard">Download my results card</button>
+</section>
+<p class="note">Educational imitation learning, not reinforcement learning or real-car safety validation.
+No telemetry or student data is uploaded. The earlier eight-module lab remains available separately.</p>
+</div></main><script id="experiment-data" type="application/json">__DATA__</script>
+<script src="engine.js"></script><script src="tools.js"></script><script src="app.js"></script><script src="labs.js"></script></body></html>

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Class dashboard: Student ML Driving Lab</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101722;color:#ecf2fa;font:15px system-ui}
+main{max-width:1200px;margin:auto;padding:24px}h1{margin:6px 0}h2{font-size:20px;margin-top:28px}p{color:#acbbce;line-height:1.55}
+button,input{font:inherit;color:#ecf2fa;background:#182333;border:1px solid #536780;border-radius:7px;padding:9px;margin:6px 6px 6px 0}button{cursor:pointer;border-color:#4de2c2}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px;border-bottom:1px solid #334358;text-align:left;vertical-align:top}
+.panel{padding:16px;background:#182333;border:1px solid #334358;border-radius:12px;margin-top:16px}.note{font-size:12px}.bar{display:inline-block;height:10px;background:#4de2c2;border-radius:3px;vertical-align:middle}
+.warn{color:#ffc56b}#error{color:#ff8990;white-space:pre-wrap}a{color:#4de2c2}
+@media print{body{background:white;color:black}p{color:black}}
+</style></head><body><main>
+<h1>Class dashboard</h1>
+<p>Load the results cards your students downloaded from the lab. Everything is computed in this browser; <strong>nothing is uploaded</strong>. Cards contain no free text and no timestamps; nicknames are optional and hidden by default.
+Cards are self-reported browser sessions, so treat the aggregate as a classroom conversation starter, not a grade. <a href="teacher_guide.html">Teacher guide</a> · <a href="index.html">Lab</a></p>
+<div class="panel"><label for="cards">Results cards (JSON, select many)</label><input id="cards" type="file" multiple accept=".json,application/json">
+<label><input id="showNames" type="checkbox"> Show nicknames in the card list</label><button id="exportCsv">Download aggregate CSV</button><p id="error" role="alert"></p><p id="loaded" role="status"></p></div>
+<div id="results" hidden>
+<h2>Participation</h2><div class="panel"><table id="modulesTable"></table></div>
+<h2>Concept check</h2><div class="panel"><p id="quizSummary"></p><table id="objectivesTable"></table></div>
+<h2>Misconceptions behind wrong answers</h2><div class="panel"><p class="note">Counted from each student's most recent attempt (post if present, otherwise pre). Each wrong answer that maps to a misconception adds one.</p><table id="misconceptionsTable"></table></div>
+<h2>Experiments run</h2><div class="panel"><table id="experimentsTable"></table></div>
+<h2>Cards</h2><div class="panel"><table id="cardsTable"></table></div>
+</div>
+<script id="kit" type="application/json">__KIT__</script>
+<script>
+"use strict";
+const kit = JSON.parse(document.getElementById("kit").textContent), $ = id => document.getElementById(id);
+const SCHEMA = "f1-ml-lab-results-card-v1";
+let cards = [];
+const objectiveText = Object.fromEntries(kit.objectives.map(o => [o.id, o.text]));
+const misconceptionOf = Object.fromEntries(kit.misconceptions.map(m => [m.id, m]));
+function table(id, headings, rows) {
+  const element = $(id); element.replaceChildren();
+  const head = document.createElement("thead"), tr = document.createElement("tr");
+  for (const h of headings) { const th = document.createElement("th"); th.textContent = h; tr.append(th); }
+  head.append(tr); element.append(head);
+  const body = document.createElement("tbody");
+  for (const row of rows) { const line = document.createElement("tr"); for (const v of row) { const td = document.createElement("td"); td.textContent = String(v); line.append(td); } body.append(line); }
+  element.append(body);
+}
+function validCard(card) {
+  return card && card.schema === SCHEMA && Array.isArray(card.modules_visited) && Array.isArray(card.quiz) && typeof card.experiments === "object"
+    && card.quiz.every(q => ["pre", "post"].includes(q.phase) && Number.isInteger(q.score) && Number.isInteger(q.total) && q.total > 0 && q.score >= 0 && q.score <= q.total && typeof q.by_objective === "object" && Array.isArray(q.misconceptions));
+}
+const latest = (card, phase) => card.quiz.filter(q => q.phase === phase).at(-1) ?? null;
+const mean = values => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+const pct = v => v === null ? "n/a" : `${(100 * v).toFixed(0)}%`;
+function aggregate() {
+  $("results").hidden = !cards.length; if (!cards.length) return;
+  const n = cards.length, moduleRows = kit.modules.map(m => { const k = cards.filter(c => c.modules_visited.includes(m.id)).length; return [m.title, `${k}/${n}`, pct(k / n)]; });
+  table("modulesTable", ["Module", "Cards that visited it", "Share"], moduleRows);
+  const pre = cards.map(c => latest(c, "pre")).filter(Boolean), post = cards.map(c => latest(c, "post")).filter(Boolean);
+  const both = cards.filter(c => latest(c, "pre") && latest(c, "post")), gain = mean(both.map(c => latest(c, "post").score / latest(c, "post").total - latest(c, "pre").score / latest(c, "pre").total));
+  $("quizSummary").textContent = `Pre-lesson: ${pre.length} cards, mean ${pct(mean(pre.map(q => q.score / q.total)))}. Post-lesson: ${post.length} cards, mean ${pct(mean(post.map(q => q.score / q.total)))}.
+${both.length ? `Paired gain over ${both.length} cards with both attempts: ${gain >= 0 ? "+" : "−"}${Math.abs(100 * gain).toFixed(0)} percentage points (a descriptive average; with few cards it is not evidence of learning).` : "No card has both a pre and a post attempt yet."}`;
+  const mastery = (set, id) => { const parts = set.map(q => q.by_objective[id]).filter(Boolean); const total = parts.reduce((s, [, t]) => s + t, 0); return total ? parts.reduce((s, [k]) => s + k, 0) / total : null; };
+  table("objectivesTable", ["Objective", "Statement", "Correct before", "Correct after"], kit.objectives.map(o => [o.id, o.text, pct(mastery(pre, o.id)), pct(mastery(post, o.id))]));
+  const counts = {};
+  for (const c of cards) { const q = latest(c, "post") ?? latest(c, "pre"); for (const id of q?.misconceptions ?? []) counts[id] = (counts[id] ?? 0) + 1; }
+  table("misconceptionsTable", ["Misconception", "Students", "Addressed in"], Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([id, k]) => {
+    const m = misconceptionOf[id]; return [`${id}: ${m?.text ?? "unknown"}`, `${k}/${n}`, kit.modules.filter(x => x.misconceptions.includes(id)).map(x => x.title).join(", ") || "see teacher guide"]; }));
+  const keys = [...new Set(cards.flatMap(c => Object.keys(c.experiments)))].sort();
+  table("experimentsTable", ["Experiment", "Total runs", "Cards with at least one", "Mean runs per card"], keys.map(k => [k, cards.reduce((s, c) => s + (c.experiments[k] ?? 0), 0), cards.filter(c => (c.experiments[k] ?? 0) > 0).length, (cards.reduce((s, c) => s + (c.experiments[k] ?? 0), 0) / n).toFixed(1)]));
+  const names = $("showNames").checked;
+  table("cardsTable", [names ? "Nickname" : "Card", "Modules visited", "Pre-quiz", "Post-quiz", "Worksheets completed", "Sealed test exposed"], cards.map((c, i) => {
+    const a = latest(c, "pre"), b = latest(c, "post");
+    return [names ? c.nickname || "(anonymous)" : `Card ${i + 1}`, c.modules_visited.length, a ? `${a.score}/${a.total}` : "none", b ? `${b.score}/${b.total}` : "none", (c.worksheets_completed ?? []).length, c.exposure?.test_exposed ? "yes" : "no"];
+  }));
+}
+$("cards").onchange = async () => {
+  $("error").textContent = ""; const seen = new Set(), loaded = []; let rejected = 0;
+  for (const file of $("cards").files) {
+    try {
+      const text = await file.text(), card = JSON.parse(text);
+      if (!validCard(card)) throw new Error("not a results card for this lab");
+      if (seen.has(text)) continue; seen.add(text); loaded.push(card);
+    } catch (error) { rejected++; $("error").textContent += `${file.name}: ${error.message}\n`; }
+  }
+  cards = loaded; $("loaded").textContent = `${cards.length} cards loaded${rejected ? `, ${rejected} rejected` : ""}. Identical files are counted once.`; aggregate();
+};
+$("showNames").onchange = aggregate;
+$("exportCsv").onclick = () => {
+  const rows = [["card", "modules_visited", "pre_score", "pre_total", "post_score", "post_total", "worksheets_completed", "test_exposed"], ...cards.map((c, i) => { const a = latest(c, "pre"), b = latest(c, "post");
+    return [`card${i + 1}`, c.modules_visited.length, a?.score ?? "", a?.total ?? "", b?.score ?? "", b?.total ?? "", (c.worksheets_completed ?? []).length, c.exposure?.test_exposed ? 1 : 0]; })];
+  const url = URL.createObjectURL(new Blob([rows.map(r => r.join(",")).join("\r\n")], { type: "text/csv" }));
+  const a = document.createElement("a"); a.href = url; a.download = "class-aggregate.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+</script></main></body></html>
