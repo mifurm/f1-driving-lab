@@ -260,7 +260,7 @@ def deploy(args: argparse.Namespace) -> None:
         if not args.skip_verify:
             verify_live(url)
 
-    print(f"\nInfrastructure ready at {url} (no site uploaded yet)." if args.skip_site else f"\nLive at {url}")
+    print(f"\nInfrastructure ready at {url} (the site was not uploaded in this run)." if args.skip_site else f"\nLive at {url}")
     print(f"Remove everything with: az group delete --name {outputs['resourceGroupName']} --yes")
 
 

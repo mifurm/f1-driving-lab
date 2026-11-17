@@ -285,6 +285,7 @@ az group delete --name rg-f1-driving-lab --yes       # remove everything
 
 Run again after regenerating a lab to publish the new build; `--skip-infra` skips the (unchanged) infrastructure step, `--environment`,
 `--location` and `--subscription` choose names, region and subscription (`infra/main.bicepparam` holds the defaults, and a test keeps it in step with the script).
+Once the site exists, `--what-if` still lists `deploymentAuthPolicy`, `stableInboundIP` and `trafficSplitting` as changes: Azure sets those itself and a template cannot declare them, so they are preview noise.
 
 - **Plan and cost.** All six labs are about 405 MB. A Static Web App holds 250 MB on the Free plan and 500 MB per environment on Standard
   (about USD 9 a month, which is the default here); the build refuses content that does not fit the plan before anything is created.
