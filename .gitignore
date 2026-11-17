@@ -17,5 +17,7 @@ node_modules/
 /new_run/
 /*.zip
 /student_bundle_verification.json
+/student_v2_bundle_verification.json
+/fresh_pack*.json
 # Sibling teaching collection with its own data and bundles; version it separately
 /classic_ml_samples/

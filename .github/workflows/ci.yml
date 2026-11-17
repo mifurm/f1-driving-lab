@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# These jobs need none of the generated artifacts (they are rebuilt locally; see README.md).
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Simulator, training guards, circuit validation, NumPy/SciPy fixture, teaching kit and page consistency
+        run: python -m unittest discover -s tests -v
+
+  javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax
+        run: |
+          for file in student_engine.js student_tools.js student_app.js student_labs.js; do node --check "$file"; done
+      - name: Browser engine and statistics against the NumPy/SciPy reference fixture
+        run: npm run test:engine

@@ -1,11 +1,16 @@
 # F1 Driving Lab
 
-**New student learning lab:** [eight hands-on modules](student_artifacts/index.html),
+**Student ML Driving Lab, version 2:** [eleven hands-on modules](student_v2_artifacts/index.html),
+[measured results](STUDENT_V2_RESULTS.md), [teacher guide, rubric and printable worksheets](student_v2_artifacts/teacher_guide.html),
+a [class dashboard](student_v2_artifacts/class_dashboard.html) and a [classroom deck](student_v2_artifacts/training_deck.html).
+See [Student lab v2](#student-lab-v2) below for what changed, why, and how to run and test it.
+
+**First student lab (preserved):** [eight hands-on modules](student_artifacts/index.html),
 [measured experiments](STUDENT_RESULTS.md), [teacher guide and worksheets](student_artifacts/teacher_guide.html),
 and [classroom deck](student_artifacts/training_deck.html).
 Adds manual data collection, real in-browser training/gradients, matched controller and feature experiments,
 three genuinely new test tracks, explicit leakage lessons and real noise/delay/grip experiments.
-All earlier training runs and artifacts remain preserved.
+All earlier training runs and artifacts remain preserved; `git tag lab-v1` marks the sources that produced them.
 
 **Corner and wall-learning extension:** [close-up simulations for every track](wall_artifacts/index.html),
 [measured results](WALL_RESULTS.md), and [updated deck](wall_artifacts/training_deck.html).
@@ -24,6 +29,75 @@ The original single-track experiment below is preserved.
 
 **A real, completed 120-round training experiment**, using a small neural network
 to drive a fictional car around an original F1-inspired circuit.
+
+## Student lab v2
+
+A review of the first student lab found that it taught the mechanics well but measured some things badly. Version 2
+keeps every preserved artifact and rebuilds the lab on evidence. Each row is something that was checked, not assumed.
+
+| Found in the first lab | Version 2 |
+|---|---|
+| Validation held only deep wall-recovery states (median offset 5.08 m) while training was 89.5% near-centreline, so a 7.6x "generalization gap" was distribution shift, not overfitting | Training and validation are *different expert episodes from the same sampler* (93.6% vs 94.7% within 1 m of the centreline); near-identical starts cannot straddle splits; a separately named recovery-stress set is evaluation-only |
+| Loss was presented as learning, yet closed-loop success is flat or erratic while loss falls smoothly | Every training run records nominal and recovery driving beside the loss; ten saved reference seeds show the two diverging |
+| "Mean ± SD" of three binary outcomes | Seeds or fixed sections are the unit of replication: bootstrap intervals over seeds, paired comparisons with an exact sign test, Wilson intervals only for independent random starts, fewer than ten seeds labelled exploratory, diverged seeds counted as failures |
+| No student-facing DAgger or covariate shift | Module 7: narrow, broad, staged expert-only control and DAgger with equal budgets, projected state occupancy, and a step-by-step DAgger session. The saved ten-seed run reports that the closed-loop benefit is **not established** at this scale |
+| One architecture and one setting | Module 6: width, depth, batch size, schedules, weight decay, gradient clipping, early stopping, label noise, and ridge / nearest-neighbour baselines |
+| No account of *why* a drive failed | Module 8: expert labels at the true states, first disagreement, expert-recovery forks (a counterfactual about a state, not proof of cause) and dependency-aware permutation importance |
+| Silent failures: NaN reported as "timeout", self-intersecting circuits accepted, unchecked hyper-parameters | `numerical_divergence` is a distinct outcome; circuits are validated strictly (`Apex Park` and `Square Sprint` keep their legacy inner-wall folds, flagged and excluded from headline pools); learning rate, decay and clipping are range-checked |
+| Five quiz items, no teacher support | Eleven modules, 14 objectives, 16 quiz items whose wrong answers map to 19 catalogued misconceptions, a rubric, printable worksheets, a results card and a class dashboard; the answer key lives in `teaching_kit.json` |
+| No version control or CI | Git history, the `lab-v1` tag, GitHub Actions (`.github/workflows/ci.yml`) |
+
+### Run it
+
+`student_experiments.py` needs the wall lab's saved model and circuits (`wall_artifacts/`, not committed; rebuild them with the
+wall-lab commands or unpack a bundle). Everything below is local and needs no server.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+python student_experiments.py --output student_v2_artifacts --base wall_artifacts   # ~75 s on 14 cores
+node tools/coverage_reference.cjs --artifact student_v2_artifacts                   # ten-seed DAgger reference, ~30 s
+python student_render.py --output student_v2_artifacts                              # page, teacher guide, dashboard, charts, deck
+open student_v2_artifacts/index.html
+```
+
+For a classroom: hand students `index.html` (a single self-contained file plus four scripts), keep `teacher_guide.html`, and
+collect the results cards on `class_dashboard.html`. For a test no student could have inspected, generate a pack from a private
+seed with `python tools/make_fresh_pack.py --seed <secret> --circuits 3 --output fresh_pack.json` and load it in module 9
+after students freeze their models. The three built-in test circuits are sealed by classroom protocol only: their labels ship in the page.
+
+### Statistics policy
+
+- One training seed is one observation. Recipe comparisons use ten seeds and a percentile bootstrap over seeds; fewer is labelled exploratory.
+- Trials inside a fixed section share a track and start family, so sections (or seeds) are the unit of replication. Nominal and recovery sections are never pooled.
+- Paired comparisons share starts, seeds and noise streams, and report wins/losses/ties with an exact sign test.
+- Wilson intervals appear only when every trial is an independent random start.
+
+### Test it
+
+```bash
+python -m unittest discover -s tests          # simulator, guards, circuit validation, fixture sync, teaching kit, fresh pack (CI)
+npm run test:engine                           # browser engine and statistics vs. the committed NumPy/SciPy fixture (CI)
+npm run test:student                          # needs student_v2_artifacts: replays all 2,560 saved NumPy rollouts in JavaScript
+npm ci && PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npx playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npm run test:browser:student   # eleven modules, teacher tools and failure paths in Chromium
+python student_verify.py --output student_v2_artifacts [--bundle]        # hashes, exact replays, teaching signals, visuals, browser report
+```
+
+The fixture (`tests/fixtures/engine_fixture.json`) stores NumPy/SciPy reference values; `tests/test_fixture_sync.py` recomputes it so a
+simulator change that would make the JavaScript engine stale fails CI. The browser engine reproduces 24 fixture trajectories to
+1e-6 m and every one of the 2,560 saved rollouts of the 40 retrained networks with identical outcomes.
+
+### Numerical note
+
+Curvature inputs are piecewise constant, so a car whose nearest road point is a centreline vertex could read the neighbouring sample
+because of one ulp of rounding noise, which differs between libm builds and between the Python and JavaScript engines.
+`driving.sample_index` now assigns positions within 1e-9 samples of a boundary to the sample that starts there. Against the preserved
+first lab this changes continuous metrics (never an outcome) in 46 of 768 recorded rollouts; check out `lab-v1` to reproduce those files bit for bit.
+
+### Known limits
+
+The expert is a heuristic (about 2% of typical starts, the fast off-centre ones, trip its own lateral-acceleration limit); a learner cannot exceed its labels.
+Grip is a threshold on lateral acceleration and braking, not a tyre model. There is one simulator, one expert and original circuits; nothing here supports a real-car claim.
 
 ## Open the results
 
