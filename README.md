@@ -4,6 +4,7 @@
 [measured results](STUDENT_V2_RESULTS.md), [teacher guide, rubric and printable worksheets](student_v2_artifacts/teacher_guide.html),
 a [class dashboard](student_v2_artifacts/class_dashboard.html) and a [classroom deck](student_v2_artifacts/training_deck.html).
 See [Student lab v2](#student-lab-v2) below for what changed, why, and how to run and test it.
+To put the labs on the web for a class, see [Deploy to Azure](#deploy-to-azure).
 
 **First student lab (preserved):** [eight hands-on modules](student_artifacts/index.html),
 [measured experiments](STUDENT_RESULTS.md), [teacher guide and worksheets](student_artifacts/teacher_guide.html),
@@ -265,6 +266,41 @@ trajectories with the saved results.
 
 Create or refresh the portable bundle using `python bundle.py`; it validates
 the archive CRCs and required files before reporting success.
+
+## Deploy to Azure
+
+The labs are static files that run in the browser, so the whole site is one [Azure Static Web App](https://learn.microsoft.com/azure/static-web-apps/)
+in one resource group: nothing to patch, no server, database or identity. `infra/` defines it in Bicep, `tools/build_site.py` stages the
+website and `tools/deploy_azure.py` runs both and uploads the site. It needs the Azure CLI (2.60 or newer, signed in with `az login`) and
+Node.js 18 or newer for the upload; the labs must already be generated (see above).
+
+```bash
+python tools/deploy_azure.py --what-if               # preview the infrastructure change; creates nothing
+python tools/deploy_azure.py                         # infrastructure and site: every lab, Standard plan
+python tools/deploy_azure.py --sku Free --labs v2    # the student lab only (about 17 MB), free
+python tools/deploy_azure.py --verify-only           # compare the live site with the last build, changing nothing
+az deployment sub show --name f1-driving-lab --query properties.outputs.staticWebAppUrl.value -o tsv   # the site's address
+az group delete --name rg-f1-driving-lab --yes       # remove everything
+```
+
+Run again after regenerating a lab to publish the new build; `--skip-infra` skips the (unchanged) infrastructure step, `--environment`,
+`--location` and `--subscription` choose names, region and subscription (`infra/main.bicepparam` holds the defaults, and a test keeps it in step with the script).
+
+- **Plan and cost.** All six labs are about 405 MB. A Static Web App holds 250 MB on the Free plan and 500 MB per environment on Standard
+  (about USD 9 a month, which is the default here); the build refuses content that does not fit the plan before anything is created.
+- **What is published.** `tools/build_site.py` follows the links from each lab's pages and copies only what they reach (109 files), keeping
+  the repository's paths so links between labs and to the `*_RESULTS.md` notes keep working. Models, training data, test screenshots, zip
+  bundles, the template pages in the repository root and `classic_ml_samples/` stay on this machine. The build refuses a link that is
+  broken, wrongly cased (Azure's file system is case-sensitive), outside the repository or to a private file, and any file that contains
+  this machine's repository path (a print-to-PDF of the teacher guide once did; `tests/student-browser.mjs` now strips those links).
+- **Public by default.** Anyone with the address can open the site, **including the teacher guide and its answer key**. It sends
+  `X-Robots-Tag: noindex` and security headers, which keeps it out of search results but is not access control. The Standard plan can add
+  authentication or IP restrictions; see the Static Web Apps documentation. There is no analytics: the labs never upload student work.
+- **The upload token** is read from Azure by the script and handed to the upload in its environment; it is never printed, put on a command
+  line or written to disk. The upload client is pinned (`@azure/static-web-apps-cli`).
+- **Checks.** After uploading, the script downloads every served file and compares its SHA-256 with `site-manifest.json`. The browser
+  smoke test opens the labs in Chromium (module 12 end to end), expects no console, page or network errors, and checks the headers,
+  file types and 404 page: `PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npm run test:deployed -- https://<your-site>.azurestaticapps.net`.
 
 ## Honest boundaries
 

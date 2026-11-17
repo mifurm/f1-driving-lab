@@ -21,3 +21,8 @@ node_modules/
 /fresh_pack*.json
 # Sibling teaching collection with its own data and bundles; version it separately
 /classic_ml_samples/
+
+# Azure deployment: the staged website, its manifest and azd/az local state (never commit these)
+/site/
+/site-manifest.json
+/.azure/

@@ -10,7 +10,8 @@
     "test:browser:walls": "node tests/wall-browser.mjs",
     "test:engine": "node --test tests/engine-fixtures.cjs",
     "test:student": "node --test tests/student-engine.cjs",
-    "test:browser:student": "node tests/student-browser.mjs"
+    "test:browser:student": "node tests/student-browser.mjs",
+    "test:deployed": "node tests/deployed-smoke.mjs"
   },
   "devDependencies": {
     "playwright": "1.58.2"

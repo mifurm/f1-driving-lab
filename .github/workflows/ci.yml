@@ -27,6 +27,17 @@ jobs:
           node-version: 22
       - name: Syntax
         run: |
-          for file in student_engine.js student_tools.js student_rl.js student_journey.js student_app.js student_labs.js student_journey_ui.js tools/journey_reference.cjs; do node --check "$file"; done
+          for file in student_engine.js student_tools.js student_rl.js student_journey.js student_app.js student_labs.js student_journey_ui.js tools/journey_reference.cjs tests/deployed-smoke.mjs; do node --check "$file"; done
       - name: Browser engine and statistics against the NumPy/SciPy reference fixture
         run: npm run test:engine
+
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bicep compiles without errors or warnings
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null 2> bicep.log || { cat bicep.log; exit 1; }
+          cat bicep.log
+          if grep -q ' : Warning ' bicep.log; then echo "Bicep reported warnings"; exit 1; fi
