@@ -183,6 +183,12 @@ class SiteBuildTests(unittest.TestCase):
         self.assertLess(index.index("Alpha lab"), index.index("Beta &lt;lab&gt;"))
         self.assertIn('alt="A car"', index)
 
+    def test_a_launcher_lab_is_labelled_with_the_largest_page_it_leads_to_not_its_own_size(self):
+        write(self.root, "gamma/index.html", '<a href="pages/big.html">a circuit</a>')
+        write(self.root, "gamma/pages/big.html", "x" * 5000)
+        self.build((Lab("gamma", "Gamma launcher", "A small page that leads to a big one.", "gamma/index.html"),))
+        self.assertIn("pages up to 5 KB", (self.out / "index.html").read_text())
+
     def test_config_is_valid_json_that_sets_security_headers_and_serves_notes_as_text(self):
         self.build()
         config = json.loads((self.out / "staticwebapp.config.json").read_text())

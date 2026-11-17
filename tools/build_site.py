@@ -235,8 +235,8 @@ def card(lab: Lab, size: int, primary: bool) -> str:
     return (
         f'<article class="card{" primary" if primary else ""}">'
         f"<h3>{html.escape(lab.title)}</h3><p>{html.escape(lab.summary)}</p>"
-        f'<p><a class="button" href="{link(lab.entry)}">Open {html.escape(lab.title)}</a> '
-        f'<span class="meta">{megabytes(size)} page</span></p>'
+        f'<p class="actions"><a class="button" href="{link(lab.entry)}">Open {html.escape(lab.title)}</a>'
+        f'<span class="meta">pages up to {megabytes(size)}</span></p>'
         f'<ul class="links" aria-label="More from {html.escape(lab.title)}">{extras}</ul></article>'
     )
 
@@ -250,7 +250,8 @@ h1{font-size:clamp(34px,6vw,56px);line-height:1.05;margin:8px 0 16px}h2{font-siz
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}.card h3{margin:0 0 6px;font-size:20px}
 .card p{margin:0 0 14px;color:var(--muted)}.primary{border-color:var(--accent)}.primary h3{font-size:24px}
 .button{display:inline-block;background:var(--accent);color:#06241f;font-weight:700;text-decoration:none;padding:10px 18px;border-radius:10px}
-.button:hover,.button:focus-visible{outline:3px solid #fff;outline-offset:2px}.meta{font-size:14px}
+.button:hover,.button:focus-visible{outline:3px solid #fff;outline-offset:2px}.meta{font-size:14px;white-space:nowrap}
+.actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
 .links{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px 18px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;list-style:none;padding:0;margin:0}
 figure{margin:24px 0 0}figure img{width:100%;height:auto;border-radius:12px;border:1px solid var(--line);background:#000}
@@ -335,7 +336,8 @@ def build(root: Path, out: Path, manifest: Path, labs: Sequence[Lab], sku: str, 
         sources |= reached
     if problems:
         raise SiteError("links that cannot be served:\n  " + "\n  ".join(dict.fromkeys(problems)))
-    sizes = {lab.key: (root / lab.entry).stat().st_size for lab in labs}
+    # What opening a lab costs: some entry pages are small launchers for pages of several MB, so measure the pages they lead to.
+    sizes = {lab.key: max(path.stat().st_size for path in collect(root, [lab.entry])[0] if path.suffix.lower() in {".html", ".htm"}) for lab in labs}
 
     clashes = [name for name in GENERATED if (root / name).resolve() in sources]
     if clashes:
