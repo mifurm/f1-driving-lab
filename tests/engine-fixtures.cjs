@@ -381,3 +381,32 @@ test("The stress split is accepted for evaluation rows but never lets one episod
   assert.throws(() => E.validateRows([{ ...rows[0], split: "dev" }]), /split/);
   assert.ok(E.compatibleVersions.includes("student-lab-1") && E.compatibleVersions.includes(E.version));
 });
+
+test("PPO losses, gradients and advantage estimates agree with an independent vectorised NumPy implementation", () => {
+  const R = require("../student_rl.js"), p = inputs.ppo, e = expected.ppo, agent = new R.ActorCritic(1), n = p.observations.length;
+  const load = (layers, target) => layers.forEach((layer, l) => {
+    const t = target[l];
+    for (let i = 0; i < t.nIn; i++) for (let j = 0; j < t.nOut; j++) t.W[j * t.nIn + i] = layer.weights[i][j];
+    layer.biases.forEach((v, j) => { t.b[j] = v; });
+  });
+  load(p.actor, agent.actor); load(p.critic, agent.critic); agent.logStd.set(p.log_std);
+  p.observations.forEach((x, i) => {
+    closeAll(Array.from(agent.forwardActor(x)), e.mean[i], 1e-12, `policy mean ${i}`);
+    close(agent.forwardCritic(x), e.value[i], 1e-12, `value ${i}`);
+  });
+  const batch = { obs: Float64Array.from(p.observations.flat()), actions: Float64Array.from(e.actions.flat()), logp: Float64Array.from(e.old_logp), advantages: Float64Array.from(p.advantages), returns: Float64Array.from(p.returns) };
+  const stats = agent.ppoGradient(batch, Array.from({ length: n }, (_, i) => i), { clipRange: p.options.clip_range, valueCoef: p.options.value_coef, entropyCoef: p.options.entropy_coef });
+  for (const [mine, theirs] of [["policyLoss", "policy_loss"], ["valueLoss", "value_loss"], ["entropy", "entropy"], ["kl", "kl"], ["clipFraction", "clip_fraction"]]) close(stats[mine], e[theirs], 1e-11, mine);
+  assert.ok(stats.clipFraction > 0 && stats.clipFraction < 1, "the problem exercises both the clipped and the unclipped branch");
+  // Gradients in the trainer are stored output-major; NumPy's are input-major.
+  const compare = (layers, gradients, label) => layers.forEach((layer, l) => {
+    for (let i = 0; i < layer.nIn; i++) for (let j = 0; j < layer.nOut; j++) close(layer.gW[j * layer.nIn + i], gradients[l].weights[i][j], 1e-10, `${label} layer ${l} weight ${i},${j}`);
+    closeAll(Array.from(layer.gb), gradients[l].biases, 1e-10, `${label} layer ${l} bias`);
+  });
+  compare(agent.actor, e.actor_gradients, "actor"); compare(agent.critic, e.critic_gradients, "critic");
+  closeAll(Array.from(agent.gLogStd), e.log_std_gradient, 1e-10, "log-std gradient");
+  p.gae.forEach((c, k) => {
+    const result = R.gae({ rewards: c.rewards, values: c.values, done: c.done, lastValue: c.last_value, gamma: c.gamma, lambda: c.lambda });
+    closeAll(Array.from(result.advantages), e.gae[k].advantages, 1e-12, `advantages ${k}`); closeAll(Array.from(result.returns), e.gae[k].returns, 1e-12, `returns ${k}`);
+  });
+});

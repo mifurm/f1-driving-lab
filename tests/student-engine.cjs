@@ -155,3 +155,118 @@ test("The saved reference coverage run reports one value per seed for every reci
   for (const arm of reference.arms) for (const key of ["nominal", "recovery", "hold", "overall"]) assert.equal(arm[key].values.length, reference.settings.seeds);
   assert.ok(reference.comparisons.every(c => c.overall.wins + c.overall.losses + c.overall.ties === reference.settings.seeds));
 });
+// ---- module 12: reinforcement learning and the zero-to-a-lap journey -------------------------------------------------------------------
+const R = require("../student_rl.js");
+const J = require("../student_journey.js");
+const ctx = { cfg: data.config, tracks: new Map(tracks.map(t => [t.id, t])) };
+test("PPO gradients match finite differences of the loss for the actor, the critic and the exploration noise", () => {
+  const ac = new R.ActorCritic(5, { outputScale: 1 }), rng = new E.RNG(11), n = 24;
+  const batch = { obs: new Float64Array(n * 18), actions: new Float64Array(n * 2), logp: new Float64Array(n), advantages: new Float64Array(n), returns: new Float64Array(n) };
+  for (let i = 0; i < n; i++) {
+    const x = Array.from({ length: 18 }, () => rng.normal() * .5), sample = ac.act(x, rng);
+    batch.obs.set(x, i * 18); batch.actions.set(sample.action, i * 2);
+    // Old log-probabilities are shifted so some ratios sit well inside the clip range and others well outside it, away from the kinks.
+    batch.logp[i] = sample.logp + [0, .6, -.6, .02][i % 4]; batch.advantages[i] = rng.normal(); batch.returns[i] = rng.normal();
+  }
+  const indices = Array.from({ length: n }, (_, i) => i), options = { clipRange: .2, valueCoef: .5, entropyCoef: .01 };
+  const loss = () => { const s = ac.ppoGradient(batch, indices, options); return s.policyLoss + options.valueCoef * s.valueLoss - options.entropyCoef * s.entropy; };
+  loss();
+  const analytic = ac.gradients.map(g => Float64Array.from(g));
+  // Parameter groups: actor W/b x3, critic W/b x3, then the shared log standard deviations.
+  for (const [group, index] of [[0, 40], [1, 3], [2, 10], [3, 5], [4, 7], [5, 1], [6, 50], [7, 2], [8, 30], [9, 4], [10, 3], [11, 0], [12, 0], [12, 1]]) {
+    const parameter = ac.parameters[group], old = parameter[index], epsilon = 1e-6;
+    parameter[index] = old + epsilon; const plus = loss();
+    parameter[index] = old - epsilon; const minus = loss();
+    parameter[index] = old;
+    const numeric = (plus - minus) / (2 * epsilon), expected = analytic[group][index];
+    assert.ok(Math.abs(numeric - expected) < 1e-6 * Math.max(1, Math.abs(expected)), `group ${group} index ${index}: finite difference ${numeric} vs backpropagation ${expected}`);
+  }
+});
+test("Generalised advantage estimation matches a hand calculation, including an episode end", () => {
+  const gamma = .9, lambda = .8, rewards = [1, 0, 2], values = [.5, .4, .3], done = [0, 0, 1], lastValue = 7;
+  const { advantages, returns } = R.gae({ rewards, values, done, lastValue, gamma, lambda });
+  const delta2 = 2 - .3, delta1 = 0 + gamma * .3 - .4, delta0 = 1 + gamma * .4 - .5;   // the last step ends the episode, so lastValue is not bootstrapped
+  const a2 = delta2, a1 = delta1 + gamma * lambda * a2, a0 = delta0 + gamma * lambda * a1;
+  [a0, a1, a2].forEach((expected, i) => close(advantages[i], expected, 1e-12, `advantage ${i}`));
+  [a0 + .5, a1 + .4, a2 + .3].forEach((expected, i) => close(returns[i], expected, 1e-12, `return ${i}`));
+  const alive = R.gae({ rewards, values, done: [0, 0, 0], lastValue, gamma, lambda }).advantages;
+  close(alive[2], 2 + gamma * lastValue - .3, 1e-12, "bootstrapped last advantage");
+});
+test("The reward pays distance, charges for crashing and changes in the commands, and starts each drive without a previous command", () => {
+  const track = tracks.find(t => t.id === 1), only = reward => new R.DrivingEnv({ track, cfg: data.config, seed: 3, reward: { distance: 0, centering: 0, failure: 0, smoothness: 0, ...reward } });
+  const smooth = only({ smoothness: 1 }); smooth.reset();
+  close(smooth.step([.2, .5]).reward, 0, 1e-15, "no previous command on the first step");
+  close(smooth.step([-.4, .5]).reward, -((-.4 - .2) ** 2 + 0) / 2, 1e-12, "squared change of the two commands, averaged");
+  smooth.reset(); close(smooth.step([.9, -.9]).reward, 0, 1e-15, "a reset forgets the previous command");
+  const distance = only({ distance: 1 }); distance.reset();
+  const moved = distance.step([0, 1]); assert.ok(moved.advanced > 0); close(moved.reward, moved.advanced, 1e-12, "distance reward is 1 per metre when weighted 1");
+  const crash = only({ failure: 5 }); crash.reset();
+  let result; for (let i = 0; i < 400 && !result?.terminated; i++) result = crash.step([1, 1]);
+  assert.ok(result.terminated && result.reason !== ""); close(result.reward, -5, 1e-12, "the failure charge");
+});
+test("The reinforcement actor starts exactly where an imitation network of the same seed starts and exports as an ordinary network", () => {
+  const agent = new R.ActorCritic(7, { outputScale: 1 }), exported = agent.actorNetwork(), reference = new E.Network(7);
+  assert.deepEqual(exported.weights, reference.weights); assert.deepEqual(exported.biases, reference.biases);
+  const x = Array.from({ length: 18 }, (_, i) => Math.sin(i)), mean = agent.forwardActor(x);
+  exported.predict(x).forEach((v, i) => close(v, mean[i], 1e-12, `output ${i}`));
+  assert.equal(E.fingerprint(exported), E.fingerprint(E.Network.fromJSON(exported.serialize())));
+});
+test("PPO training is deterministic for a seed, differs between seeds, and rejects unknown settings", async () => {
+  const track = tracks.find(t => t.id === 1), run = seed => R.ppoTrain({ track, cfg: data.config, seed, iterations: 2, envs: 2, rolloutSteps: 64, minibatch: 64 });
+  const [a, b, c] = [await run(1), await run(1), await run(2)];
+  assert.deepEqual(a.history, b.history); assert.deepEqual(a.agent.actorNetwork().weights, b.agent.actorNetwork().weights);
+  assert.notDeepEqual(a.agent.actorNetwork().weights, c.agent.actorNetwork().weights);
+  assert.equal(a.steps, 2 * 2 * 64); assert.ok(a.history.every(h => Number.isFinite(h.policyLoss) && Number.isFinite(h.valueLoss) && h.kl >= 0));
+  await assert.rejects(R.ppoTrain({ track, cfg: data.config, iterations: 1, lr: 1 }), /Unknown PPO setting/);
+});
+test("Run summaries separate the first lap from the lap that stays, and flag runs that lose it or flick the steering", () => {
+  const row = (steps, done, flicker = .1) => [steps, done ? 100 : 40, done ? 1 : 0, done ? 130 : 20, flicker];
+  const lucky = [row(0, 0), row(300, 1), row(600, 0), row(900, 1), row(1200, 1)], lost = [row(0, 0), row(300, 1), row(600, 0)], flicking = [row(0, 0), row(300, 1, 4.5)];
+  assert.deepEqual(J.runSummary(lucky, 100), { firstLapSteps: 300, stableLapSteps: 900, finalCompleted: true, ratio: 1.3, regressed: false, lostLap: true, flicker: .1, flicks: false });
+  assert.equal(J.runSummary(flicking, 100).flicks, true); assert.equal(J.runSummary([row(0, 0), [150, 0, 0, 3, 4.5]], 100).flicks, false, "a drive that ends within 10 s is too short to judge");
+  assert.deepEqual([J.runSummary(lost, 100).firstLapSteps, J.runSummary(lost, 100).stableLapSteps, J.runSummary(lost, 100).regressed], [300, null, true]);
+  const summary = J.aggregate([{ stages: lucky }, { stages: lost }, { stages: flicking }], 100);
+  assert.deepEqual([summary.seeds, summary.finalLaps, summary.regressed, summary.lostLap, summary.flickering], [3, 2, 1, 2, 1]);
+  assert.equal(summary.firstLapSteps.median, 300); assert.equal(summary.stableLapSteps.n, 2);
+  assert.equal(J.lapPercent({ completed: false, progress: .9996 }), 99); assert.equal(J.lapPercent({ completed: true, progress: 1 }), 100);
+  assert.deepEqual(J.rlMarks(100).slice(-3), [64, 80, 100]); assert.equal(J.rlMarks(7).at(-1), 7);
+});
+test("The imitation journey starts from the untrained network and its lap test is a real whole lap", async () => {
+  const track = tracks.find(t => t.id === 1), stages = [];
+  const run = await J.imitationJourney({ track, ctx, seed: 1, rounds: 6, onStage: stage => stages.push(stage) });
+  assert.equal(stages.length, run.stages.length); assert.equal(run.stages.length, 8);
+  assert.deepEqual(run.stages[0].model.weights, new E.Network(1).serialize().weights); assert.equal(run.stages[0].steps, 0);
+  assert.ok(run.stages.every((s, i) => i === 0 || s.steps > run.stages[i - 1].steps));
+  assert.ok(!run.stages[0].lap.completed && run.stages[0].lap.progress < .05, "an untrained car fails at once");
+  const laps = run.stages.filter(s => s.lap.completed);
+  assert.ok(laps.length > 0, "some trained stage completes the lap"); assert.ok(laps.every(s => s.lap.progress === 1 && s.lap.seconds > 90 && s.lap.seconds < 400));
+  const expert = J.expertLap(track, data.config); assert.ok(expert.completed && expert.seconds > 100 && expert.seconds < 120);
+});
+test("The reinforcement journey learns to lap from a reward alone, smoothly, and a saved stage restores exactly", async () => {
+  const track = tracks.find(t => t.id === 1), run = await J.reinforcementJourney({ track, ctx, seed: 1, iterations: 40 });
+  assert.deepEqual(run.stages.map(s => s.iteration), [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25, 32, 40]);
+  assert.ok(!run.stages[0].lap.completed && run.stages[0].lap.progress < .05, "an untrained car fails at once");
+  const final = run.stages.at(-1); assert.ok(final.lap.completed, "the final car completes the lap"); assert.ok(final.lap.flicker < J.FLICKER_LIMIT, "and does not flick the steering");
+  assert.equal(final.steps, 40 * 2048); assert.equal(run.history.length, 40);
+  const saved = { index: final.index, iteration: final.iteration, steps: final.steps, updates: final.updates, model: final.model, row: J.compactStage(final) };
+  assert.equal(J.restoreStage("reinforcement", track, data.config, saved).reproduced, true);
+  assert.equal(J.restoreStage("reinforcement", track, data.config, { ...saved, row: [...saved.row.slice(0, 3), saved.row[3] + .1, saved.row[4]] }).reproduced, false);
+});
+test("Cancelling a reinforcement journey keeps the car as it stands", async () => {
+  const track = tracks.find(t => t.id === 1); let polls = 0;
+  const run = await J.reinforcementJourney({ track, ctx, seed: 1, iterations: 20, shouldCancel: () => ++polls > 2 });
+  assert.equal(run.stopped, "cancelled"); assert.equal(run.history.length, 2); assert.equal(run.stages.at(-1).iteration, 2);
+});
+const savedJourney = data.journeyReference ? false : "run tools/journey_reference.cjs, then student_render.py";
+test("The saved journey example reproduces in this engine stage by stage, and its summary is what the code computes from the raw runs", { skip: onlyV2 || savedJourney }, () => {
+  const file = path.join(output, "data/journey_reference.json"), reference = JSON.parse(fs.readFileSync(file, "utf8")), page = data.journeyReference;
+  assert.deepEqual(Object.keys(page).sort(), Object.keys(reference).filter(k => !["runs", "markdown"].includes(k)).sort());
+  assert.equal(page.settings.seeds, 10); assert.equal(Object.keys(page.circuits).length, data.dataGeneration.valid_training_tracks.length);
+  const featured = page.featured, track = tracks.find(t => t.id === featured.trackId);
+  for (const method of ["imitation", "reinforcement"]) for (const saved of featured[method].stages) assert.equal(J.restoreStage(method, track, data.config, saved).reproduced, true, `${method} stage ${saved.index}`);
+  for (const id of data.dataGeneration.valid_training_tracks) {
+    const expert = J.expertLap(tracks.find(t => t.id === id), data.config).seconds, circuit = reference.circuits[id];
+    close(expert, circuit.expertSeconds, .051, `expert lap ${id}`);
+    for (const method of ["imitation", "reinforcement"]) assert.deepEqual(JSON.parse(JSON.stringify(J.aggregate(reference.runs[method][id], expert))), JSON.parse(JSON.stringify(circuit[method])), `${method} ${id}`);
+  }
+});

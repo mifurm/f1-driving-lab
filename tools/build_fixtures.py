@@ -83,6 +83,7 @@ def build_inputs(pretrained_path):
         "bootstrap": {"values": rng.normal(0.5, 0.2, 10).tolist(),
                       "resamples": rng.integers(0, 10, (200, 10)).tolist()},
         "permutations": [[rng.permutation(30).tolist() for _ in range(2)] for _ in range(3)],
+        "ppo": ppo_inputs(),
     }
 
 
@@ -92,6 +93,90 @@ def trajectory_record(label, track_id, scenario_index, metric, trace):
             "x": rounded(trace[:, 1]), "y": rounded(trace[:, 2]), "heading": rounded(trace[:, 3]),
             "speed": rounded(trace[:, 4]), "lateral": rounded(trace[:, 6]), "brake": rounded(trace[:, 9]),
             "gear": trace[:, 10].astype(int).tolist(), "margin": rounded(trace[:, 17])}
+
+
+PPO_SHIFTS = [0.0, 0.6, -0.6, 0.02]  # old-policy log-probability offsets: ratios well inside and well outside the clip range
+PPO_OPTIONS = {"clip_range": 0.2, "value_coef": 0.5, "entropy_coef": 0.01}
+
+
+def ppo_inputs():
+    """A fixed PPO problem for the JavaScript trainer: random policy and critic networks, a batch of drives and two advantage-estimation trajectories."""
+    rng = np.random.default_rng(2077)
+
+    def network(sizes):
+        return [{"weights": rng.normal(0, 1 / np.sqrt(n_in), (n_in, n_out)).tolist(), "biases": rng.normal(0, 0.1, n_out).tolist()}
+                for n_in, n_out in zip(sizes, sizes[1:])]
+
+    n = 12
+    return {"actor": network([18, 24, 16, 2]), "critic": network([18, 24, 16, 1]), "log_std": [-0.7, -1.2],
+            "observations": rng.normal(0, 0.5, (n, 18)).tolist(), "noise": rng.normal(size=(n, 2)).tolist(),
+            "shifts": [PPO_SHIFTS[i % 4] for i in range(n)], "advantages": rng.normal(size=n).tolist(), "returns": rng.normal(size=n).tolist(),
+            "options": PPO_OPTIONS,
+            "gae": [{"rewards": [1.0, 0.0, 2.0, -1.0, 0.5], "values": [0.5, 0.4, 0.3, 0.2, 0.1], "done": [0, 0, 1, 0, 0], "last_value": 0.7, "gamma": 0.9, "lambda": 0.8},
+                    {"rewards": rng.normal(size=8).tolist(), "values": rng.normal(size=8).tolist(), "done": [0, 1, 0, 0, 0, 1, 0, 0], "last_value": -0.3, "gamma": 0.99, "lambda": 0.95}]}
+
+
+def mlp_forward(layers, x, squash_last):
+    activations = [x]
+    for index, layer in enumerate(layers):
+        z = activations[-1] @ np.array(layer["weights"]) + np.array(layer["biases"])
+        activations.append(np.tanh(z) if squash_last or index < len(layers) - 1 else z)
+    return activations
+
+
+def mlp_backward(layers, activations, d_out, squash_last):
+    gradients, delta = [], d_out
+    for index in range(len(layers) - 1, -1, -1):
+        if squash_last or index < len(layers) - 1:
+            delta = delta * (1 - activations[index + 1] ** 2)
+        gradients.append({"weights": rounded(activations[index].T @ delta), "biases": rounded(delta.sum(axis=0))})
+        delta = delta @ np.array(layers[index]["weights"]).T
+    return gradients[::-1]
+
+
+def gae_reference(case):
+    """Textbook generalised advantage estimation as an explicit sum over the steps that follow, stopping at the end of an episode."""
+    rewards, values, done = np.array(case["rewards"]), np.array(case["values"]), np.array(case["done"])
+    steps = len(rewards)
+    deltas = [rewards[t] + case["gamma"] * (case["last_value"] if t == steps - 1 else values[t + 1]) * (1 - done[t]) - values[t] for t in range(steps)]
+    advantages = []
+    for t in range(steps):
+        total, discount = 0.0, 1.0
+        for k in range(t, steps):
+            total += discount * deltas[k]
+            if done[k]:
+                break
+            discount *= case["gamma"] * case["lambda"]
+        advantages.append(total)
+    return {"advantages": rounded(advantages), "returns": rounded(np.array(advantages) + values)}
+
+
+def ppo_expected(case):
+    """PPO loss pieces and their analytic gradients for the fixed problem, as one vectorised NumPy pass (the JavaScript trainer loops over samples)."""
+    options, x = case["options"], np.array(case["observations"])
+    n, log_std = len(x), np.array(case["log_std"])
+    sigma = np.exp(log_std)
+    actor, critic = mlp_forward(case["actor"], x, True), mlp_forward(case["critic"], x, False)
+    mean, value = actor[-1], critic[-1][:, 0]
+    noise = np.array(case["noise"])
+    actions = mean + sigma * noise
+    logp = (-0.5 * noise ** 2 - log_std - 0.5 * np.log(2 * np.pi)).sum(axis=1)
+    old_logp = logp - np.array(case["shifts"])
+    advantages, returns = np.array(case["advantages"]), np.array(case["returns"])
+    ratio = np.exp(logp - old_logp)
+    low, high = 1 - options["clip_range"], 1 + options["clip_range"]
+    surrogate = np.minimum(ratio * advantages, np.clip(ratio, low, high) * advantages)
+    # A sample's gradient vanishes once the ratio has moved past the clip range in the direction the advantage rewards.
+    active = ~(((advantages > 0) & (ratio > high)) | ((advantages < 0) & (ratio < low)))
+    d_logp = np.where(active, -advantages * ratio / n, 0.0)
+    d_mean = d_logp[:, None] * noise / sigma
+    d_log_std = (d_logp[:, None] * (noise ** 2 - 1)).sum(axis=0) - options["entropy_coef"]
+    d_value = options["value_coef"] * (value - returns) / n
+    return {"mean": rounded(mean), "value": rounded(value), "actions": rounded(actions), "old_logp": rounded(old_logp),
+            "policy_loss": float(-surrogate.mean()), "value_loss": float((0.5 * (value - returns) ** 2).mean()),
+            "entropy": float(log_std.sum() + np.log(2 * np.pi) + 1), "kl": float((ratio - 1 - np.log(ratio)).mean()), "clip_fraction": float((~active).mean()),
+            "actor_gradients": mlp_backward(case["actor"], actor, d_mean, True), "critic_gradients": mlp_backward(case["critic"], critic, d_value[:, None], False),
+            "log_std_gradient": rounded(d_log_std), "gae": [gae_reference(c) for c in case["gae"]]}
 
 
 def compute(inputs):
@@ -174,6 +259,7 @@ def compute(inputs):
         "wilson": wilson, "bootstrap": bootstrap, "sign_test": sign, "schedules": schedules, "ridge": ridge, "knn": knn,
         "permutation": {"baseline": baseline, "groups": permutation, "rows": 30},
         "pretrained_loss": weighted_loss(pretrained.predict(features), targets),
+        "ppo": ppo_expected(inputs["ppo"]),
     }
 
 
