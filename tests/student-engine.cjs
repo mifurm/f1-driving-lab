@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
 const E = require("../student_engine.js");
-const output = path.resolve(process.env.STUDENT_OUTPUT || "student_artifacts");
+const output = path.resolve(process.env.STUDENT_OUTPUT || "student_v2_artifacts");
 const data = JSON.parse(fs.readFileSync(path.join(output, "data/lab.json"), "utf8"));
 const golden = JSON.parse(fs.readFileSync(path.join(output, "data/golden.json"), "utf8"));
 const tracks = data.tracks.map(track => new E.Track(track));
@@ -120,4 +120,38 @@ test("Sample variability is reported correctly and empty statistics fail visibly
   assert.deepEqual(E.meanSD([1, 2, 3]), { mean: 2, sd: 1 });
   assert.deepEqual(E.meanSD([5]), { mean: 5, sd: null });
   assert.throws(() => E.meanSD([]));
+});
+// ---- version-2 artifacts ----------------------------------------------------------------------------------------------------------
+const T = require("../student_tools.js");
+const onlyV2 = data.version === "student-lab-2" ? false : "needs the version-2 artifacts (student_v2_artifacts)";
+test("The saved lab and the engine speak a compatible version", { skip: onlyV2 }, () => {
+  assert.ok(E.compatibleVersions.includes(data.version), `${data.version} is not one of ${E.compatibleVersions}`);
+});
+test("The browser engine replays every saved NumPy rollout of all 40 retrained networks with identical outcomes", { skip: onlyV2 }, () => {
+  assert.equal(data.dataGeneration.seeds.ablation.length, 10); assert.equal(Object.keys(data.models).length, 40);
+  const byId = new Map(tracks.map(t => [t.id, t])), nets = new Map(Object.entries(data.models).map(([key, model]) => [key, E.Network.fromJSON(model)]));
+  const numeric = ["progress", "duration_s", "min_clearance_m", "exit_mean_lateral_m", "peak_speed_kmh", "braking_s"];
+  let worst = 0;
+  for (const record of data.ablations) {
+    const { metric } = E.simulate(byId.get(record.track_id), data.config, nets.get(record.model), data.scenarios[record.track_id][record.scenario_index]);
+    const label = `${record.model} track ${record.track_id} section ${record.scenario_index}`;
+    for (const field of ["success", "end_reason", "wall_contacts"]) assert.equal(metric[field], record[field], `${label}: ${field}`);
+    for (const field of numeric) { const difference = Math.abs(metric[field] - record[field]); worst = Math.max(worst, difference); assert.ok(difference < 1e-9, `${label}: ${field} ${metric[field]} vs ${record[field]}`); }
+  }
+  assert.equal(data.ablations.length, 2560); assert.ok(worst < 1e-9);
+});
+test("The classroom data obey the same rules the page enforces: whole episodes per split, no near-duplicate starts, sealed rows kept apart", { skip: onlyV2 }, () => {
+  E.validateRows(data.starter); E.validateRows(data.stressRows); E.validateRows(data.testRows, true);
+  T.validateEpisodeStarts(data.starterEpisodes);
+  assert.ok(data.starter.every(r => r.track_id < 11) && data.testRows.every(r => r.track_id >= 13));
+  const first = Object.entries(data.starterEpisodes).find(([, m]) => m.split === "train"), other = Object.entries(data.starterEpisodes).find(([, m]) => m.split === "validation");
+  assert.ok(first && other);
+  const twin = { ...first[1], split: "validation", lateral: first[1].lateral + .01 };
+  assert.throws(() => T.validateEpisodeStarts({ ...data.starterEpisodes, twin }), /near|leak|similar/i);
+});
+test("The saved reference coverage run reports one value per seed for every recipe", { skip: onlyV2 || (data.coverageReference ? false : "run tools/coverage_reference.cjs, then student_render.py") }, () => {
+  const reference = data.coverageReference;
+  assert.equal(reference.settings.seeds, 10); assert.equal(reference.arms.length, 4);
+  for (const arm of reference.arms) for (const key of ["nominal", "recovery", "hold", "overall"]) assert.equal(arm[key].values.length, reference.settings.seeds);
+  assert.ok(reference.comparisons.every(c => c.overall.wins + c.overall.losses + c.overall.ties === reference.settings.seeds));
 });
