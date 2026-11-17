@@ -15,6 +15,9 @@ const output = path.resolve(process.argv[2] || "student_v2_artifacts");
 const kit = JSON.parse(await fs.readFile("teaching_kit.json", "utf8"));
 const python = process.env.PYTHON || (existsSync(".venv/bin/python") ? ".venv/bin/python" : "python3");
 const errors = [], checks = {}, exercised = [], downloadNames = [], failedChecks = [], scratch = await fs.mkdtemp(path.join(os.tmpdir(), "f1-lab-"));
+// What the lab downloads during the run is kept apart from the lab's real data files.
+const downloads = path.join(output, "browser_downloads");
+await fs.mkdir(downloads, { recursive: true });
 // KEEP_GOING=1 collects every failed check instead of stopping at the first (used to show that a new check fails on code without its fix).
 const keepGoing = process.env.KEEP_GOING === "1";
 const check = (name, condition, detail = "") => {
@@ -23,7 +26,8 @@ const check = (name, condition, detail = "") => {
 };
 // The page logs every handled error to the console. These come from the failure paths this test triggers on purpose; anything else is a bug.
 const intended = [/Make both predictions/, /nearly identical/, /does not match this lab/, /Learning rate: choose a number between/, /not a fresh test pack/, /Answer every question/,
-  /has no valid sections/, /no built-in circuit uses/, /check is already recorded/, /Cancelled: no DAgger session was started/, /Cancelled: the DAgger session was not changed/];
+  /has no valid sections/, /no built-in circuit uses/, /check is already recorded/, /Cancelled: no DAgger session was started/, /Cancelled: the DAgger session was not changed/,
+  /Cancelled: nothing was added to the DAgger session/];
 const unexpected = text => !intended.some(pattern => pattern.test(text));
 // The report is only evidence for the exact build it exercised, so it carries the hashes of the page files; student_verify.py compares them with the files on disk.
 const BUILD_FILES = ["index.html", "app.js", "engine.js", "tools.js", "labs.js", "class_dashboard.html", "teacher_guide.html"];
@@ -35,8 +39,8 @@ async function setRange(page, id, value) {
   await page.locator(`#${id}`).evaluate((input, next) => { input.value = next; input.dispatchEvent(new Event("input")); }, String(value));
 }
 const idle = (page, timeout = 240000) => page.waitForFunction(() => !studentLab.busy, null, { timeout });
-// Makes every yield inside the lab take about 60 ms, so a Cancel click lands inside a long action instead of racing it.
-const slowFrames = page => page.evaluate(() => { window.__raf = window.requestAnimationFrame; window.requestAnimationFrame = callback => window.setTimeout(() => callback(performance.now()), 60); });
+// Makes every yield inside the lab take `ms` milliseconds (60 by default), so a Cancel click, or another tab, lands inside a long action instead of racing it.
+const slowFrames = (page, ms = 60) => page.evaluate(delay => { window.__raf = window.requestAnimationFrame; window.requestAnimationFrame = callback => window.setTimeout(() => callback(performance.now()), delay); }, ms);
 const normalFrames = page => page.evaluate(() => { window.requestAnimationFrame = window.__raf; });
 // Presses Cancel while a long action runs; false means the action had already finished (or never started) and there was nothing to cancel.
 const cancelRunning = page => page.locator("#cancelRun").click({ timeout: 5000 }).then(() => true, () => false);
@@ -56,7 +60,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1500, height: 1300 }, acceptDownloads: true });
   page.on("pageerror", e => errors.push(e.message));
   page.on("console", message => { if (message.type() === "error" && unexpected(message.text())) errors.push(message.text()); });
-  page.on("download", async download => { downloadNames.push(download.suggestedFilename()); await download.saveAs(path.join(output, "data", download.suggestedFilename())); });
+  page.on("download", async download => { downloadNames.push(download.suggestedFilename()); await download.saveAs(path.join(downloads, download.suggestedFilename())); });
   await page.goto(pathToFileURL(path.join(output, "index.html")).href);
   await page.waitForFunction(() => !!window.studentLab);
 
@@ -104,9 +108,9 @@ try {
   check("starter_set_loaded_with_both_splits", /train/i.test(counts) && /validation/i.test(counts), counts);
   await page.locator("#downloadDataset").click(); await page.locator("#downloadCSV").click(); await page.waitForTimeout(250);
   check("dataset_downloads_exist", downloadNames.includes("student-driving-dataset.json") && downloadNames.includes("student-driving-dataset.csv"));
-  const csv = await fs.readFile(path.join(output, "data/student-driving-dataset.csv"), "utf8");
+  const csv = await fs.readFile(path.join(downloads, "student-driving-dataset.csv"), "utf8");
   check("csv_has_labels_and_all_inputs", csv.split("\r\n")[0].includes("label_steering_fraction") && csv.split("\r\n")[0].split(",").length === 5 + 18 + 2);
-  const savedDataset = await fs.readFile(path.join(output, "data/student-driving-dataset.json"), "utf8");
+  const savedDataset = await fs.readFile(path.join(downloads, "student-driving-dataset.json"), "utf8");
   await page.locator("#importDataset").setInputFiles({ name: "wrong.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ version: "other", rows: [] })) });
   await page.waitForFunction(() => document.getElementById("error").textContent.length > 0);
   check("dataset_from_another_version_is_rejected", (await error(page)).includes("does not match"));
@@ -121,6 +125,8 @@ try {
   await page.locator("#updates").fill("400"); await page.locator("#trainStudent").click();
   await page.waitForFunction(() => studentLab.losses.length >= 3);
   check("cancel_button_appears_while_training", await page.locator("#cancelRun").isVisible());
+  await page.locator("#importDataset").setInputFiles({ name: "busy.json", mimeType: "application/json", buffer: Buffer.from(savedDataset) });
+  check("a_file_chosen_while_the_lab_is_busy_is_refused_and_the_input_still_emptied", (await error(page)).includes("Wait for the current experiment") && await page.locator("#importDataset").evaluate(input => input.files.length === 0));
   await page.locator("#cancelRun").click(); await idle(page);
   check("cancelling_stops_training_early_and_says_so", await page.evaluate(() => studentLab.student.updates < 400 && studentLab.lastFit.stopped === "cancelled"));
   await page.locator("#updates").fill("40"); await page.locator("#trainStudent").click();
@@ -158,7 +164,7 @@ try {
   check("expert_beats_rules_in_the_same_sections", outcomes.Expert > outcomes.Rules, JSON.stringify(outcomes));
   await page.locator("#downloadComparison").click(); await page.waitForTimeout(200);
   check("comparison_download_exists", downloadNames.includes("controller-comparison.json"));
-  const comparisonFile = await fs.readFile(path.join(output, "data/controller-comparison.json"), "utf8");
+  const comparisonFile = await fs.readFile(path.join(downloads, "controller-comparison.json"), "utf8");
   check("comparison_export_names_its_policies_but_never_embeds_weights", !/"weights"|"mW"|"biases"/.test(comparisonFile) && comparisonFile.includes('"policy": "model"') && comparisonFile.length < 600000, `${comparisonFile.length} bytes`);
   await finish(page, "controllers", "04_controllers");
 
@@ -211,6 +217,19 @@ try {
   check("retraining_after_a_cancel_adds_each_state_exactly_once", await page.evaluate(n => { const d = studentLab.dagger; return d.rows.length === n && new Set(d.rows.map(r => r.id)).size === d.rows.length; }, JSON.parse(beforeCancel).rows + pendingRows));
   await slowFrames(page); await page.locator("#startDagger").click(); const cancelledStart = await cancelRunning(page); await idle(page); await normalFrames(page);
   check("cancelling_a_new_dagger_session_keeps_the_existing_one", cancelledStart && (await error(page)).startsWith("Cancelled") && await page.evaluate(() => studentLab.dagger === window.__session && studentLab.dagger.round === 1));
+  // A cancelled rollout must leave no trace: a fresh, identical session gives the same rollout whether or not one was cancelled first.
+  const rolloutOf = () => page.evaluate(() => { const p = studentLab.dagger.pending; return JSON.stringify({ loss: p.newStateLoss, first: p.rows[0].id, last: p.rows.at(-1).id, rows: p.rows.length }); });
+  await page.locator("#startDagger").click(); await idle(page);
+  await page.locator("#daggerRollout").click(); await idle(page);
+  const uninterrupted = await rolloutOf();
+  await page.locator("#startDagger").click(); await idle(page);
+  const started = await page.evaluate(() => ({ rng: studentLab.dagger.rng.state, episode: studentLab.dagger.episode }));
+  await slowFrames(page, 100); await page.locator("#daggerRollout").click(); const cancelledRollout = await cancelRunning(page); await idle(page); await normalFrames(page);
+  const afterCancel = await page.evaluate(() => ({ rng: studentLab.dagger.rng.state, episode: studentLab.dagger.episode, pending: studentLab.dagger.pending }));
+  check("cancelling_a_dagger_rollout_gives_back_its_random_numbers_and_episode_numbers", cancelledRollout && (await error(page)).startsWith("Cancelled: nothing was added") && afterCancel.pending === null
+    && afterCancel.rng === started.rng && afterCancel.episode === started.episode, JSON.stringify({ started, afterCancel }));
+  await page.locator("#daggerRollout").click(); await idle(page);
+  check("a_rollout_after_a_cancelled_one_equals_an_uninterrupted_rollout", await rolloutOf() === uninterrupted, `${await rolloutOf()} vs ${uninterrupted}`);
   await finish(page, "coverage", "07_coverage");
 
   // ---- 8. diagnose a failure ---------------------------------------------------------------------------------------------------------
@@ -272,13 +291,13 @@ try {
   await page.locator("#worksheet").selectOption(String(kit.worksheets.findIndex(w => w.runner === "controllers"))); await page.locator("#wsSeeds").selectOption("3");
   await page.locator("#hypothesis").fill("The expert will complete more sections than the rules."); await page.locator("#runWorksheet").click(); await idle(page, 300000);
   await page.locator("#exportWorksheet").click(); await page.waitForTimeout(300);
-  const controllersExport = await fs.readFile(path.join(output, "data/ml-driving-worksheet.json"), "utf8");
+  const controllersExport = await fs.readFile(path.join(downloads, "ml-driving-worksheet.json"), "utf8");
   check("worksheet_export_of_raw_trials_never_embeds_weights", !/"weights"|"mW"|"biases"/.test(controllersExport) && controllersExport.includes('"policy": "model"') && controllersExport.length < 1500000, `${controllersExport.length} bytes`);
   await page.locator("#worksheet").selectOption(String(kit.worksheets.findIndex(w => w.runner === "shift")));
   await page.locator("#runWorksheet").click(); await idle(page);
   await page.locator("#evidence").fill("Compared identical weights over matched seeds."); await page.locator("#conclusion").fill("A toy-model result is not a real-car safety guarantee.");
   await page.locator("#exportWorksheet").click(); await page.waitForTimeout(200);
-  const worksheetExport = JSON.parse(await fs.readFile(path.join(output, "data/ml-driving-worksheet.json"), "utf8"));
+  const worksheetExport = JSON.parse(await fs.readFile(path.join(downloads, "ml-driving-worksheet.json"), "utf8"));
   check("worksheet_export_has_hypothesis_evidence_and_rubric", worksheetExport.hypothesis.length > 0 && worksheetExport.evidence.length > 0 && worksheetExport.rubric.criteria.length === kit.rubric.criteria.length);
   const firstOrder = await page.evaluate(() => JSON.stringify(studentLab.quizOrder));
   check("quiz_choices_are_shuffled", await page.evaluate(() => studentLab.quizOrder.some(order => order[0] !== 0)));
@@ -301,7 +320,7 @@ try {
   check("pre_and_post_attempts_recorded", await page.evaluate(() => studentLab.quizAttempts.map(a => a.phase).join()) === "pre,post");
   await page.locator("#nickname").fill("Ada <script>");
   await page.locator("#downloadCard").click(); await page.waitForTimeout(250);
-  const card = JSON.parse(await fs.readFile(path.join(output, "data/ml-lab-results-card.json"), "utf8"));
+  const card = JSON.parse(await fs.readFile(path.join(downloads, "ml-lab-results-card.json"), "utf8"));
   check("results_card_has_no_free_text_or_timestamps", card.schema === "f1-ml-lab-results-card-v1" && !JSON.stringify(card).includes("<script") && !/\d{4}-\d{2}-\d{2}T/.test(JSON.stringify(card)) && !("evidence" in card) && !("hypothesis" in card));
   check("results_card_records_what_was_done", card.modules_visited.length === kit.modules.length && card.quiz.length === 2 && card.worksheets_completed.length >= kit.worksheets.length - 1 && card.exposure.test_exposed === true);
   await finish(page, "worksheets", "11_worksheets");
@@ -320,7 +339,7 @@ try {
   const dashboard = await browser.newPage({ viewport: { width: 1300, height: 1000 }, acceptDownloads: true });
   dashboard.on("pageerror", e => errors.push(`dashboard: ${e.message}`));
   dashboard.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) errors.push(`dashboard: ${message.text()}`); });
-  dashboard.on("download", async download => { downloadNames.push(download.suggestedFilename()); await download.saveAs(path.join(output, "data", download.suggestedFilename())); });
+  dashboard.on("download", async download => { downloadNames.push(download.suggestedFilename()); await download.saveAs(path.join(downloads, download.suggestedFilename())); });
   await dashboard.goto(pathToFileURL(path.join(output, "class_dashboard.html")).href);
   const attemptOf = (phase, score, misconceptions = []) => ({ phase, score, total: 16, by_objective: { O1: [score > 8 ? 1 : 0, 1] }, misconceptions });
   const synthetic = (modules, quiz) => ({ ...card, nickname: "x", modules_visited: modules, quiz });
@@ -340,7 +359,7 @@ try {
   check("dashboard_reports_a_descriptive_paired_gain", (await dashboard.locator("#quizSummary").innerText()).includes("not evidence of learning"));
   check("dashboard_hides_nicknames_by_default", !(await dashboard.locator("#cardsTable").innerText()).includes("Ada"));
   await dashboard.locator("#exportCsv").click(); await dashboard.waitForTimeout(300);
-  const aggregate = (await fs.readFile(path.join(output, "data/class-aggregate.csv"), "utf8")).split("\r\n");
+  const aggregate = (await fs.readFile(path.join(downloads, "class-aggregate.csv"), "utf8")).split("\r\n");
   check("dashboard_exports_an_aggregate_csv", aggregate.length === 4 && aggregate[0].startsWith("card,modules_visited"));
   await dashboard.screenshot({ path: path.join(output, "visuals/12_class_dashboard.png"), fullPage: true });
 
@@ -368,11 +387,32 @@ try {
   };
   const stale1 = await staleTab(); await visit(stale1, "dataset"); await stale1.locator("#clearDataset").click();
   check("a_stale_tab_cannot_write_exposure_back_to_false", await stale1.evaluate(key => JSON.parse(localStorage.getItem(key)).testExposed === true && studentLab.testExposed === true, EXPOSURE_KEY));
+  check("a_tab_that_missed_the_event_still_unseals_its_track_list_and_tables", await stale1.locator("#track option").count() === 16
+    && !(await stale1.locator("#referenceControllers tbody td:last-child").allInnerTexts()).includes("Sealed"));
   const stale2 = await staleTab(); await stale2.locator("#model").selectOption("pretrained"); await visit(stale2, "generalization");
   await stale2.locator("#freezeReveal").click(); await idle(stale2);
   check("a_freeze_in_a_stale_tab_is_not_called_the_first_reveal", (await stale2.locator("#freezeStatus").innerText()).includes("already exposed"));
+  // Two tabs freezing at once: the one that finishes second must not claim the first reveal, even though it started before the other had revealed anything.
+  const raceContext = await freshContext(), slowTab = await openTab(raceContext), fastTab = await openTab(raceContext);
+  for (const tab of [slowTab, fastTab]) { await tab.locator("#model").selectOption("pretrained"); await visit(tab, "generalization"); }
+  await slowFrames(slowTab, 150); await slowTab.locator("#freezeReveal").click();
+  await fastTab.locator("#freezeReveal").click(); await idle(fastTab); await idle(slowTab); await normalFrames(slowTab);
+  check("a_reveal_completed_elsewhere_while_a_tab_was_evaluating_is_not_called_the_first", (await fastTab.locator("#freezeStatus").innerText()).includes("first UI reveal")
+    && (await slowTab.locator("#freezeStatus").innerText()).includes("already exposed"), `${await fastTab.locator("#freezeStatus").innerText()} | ${await slowTab.locator("#freezeStatus").innerText()}`);
   await tabB.reload(); await tabB.waitForFunction(() => !!window.studentLab);
   check("exposure_survives_a_reload_of_the_revealing_tab", await tabB.evaluate(() => studentLab.testExposed));
+  // A damaged record must not stop the page from loading: it is read conservatively, as "already exposed".
+  const damaged = await freshContext(), probe = await damaged.newPage();
+  probe.on("pageerror", e => errors.push(`damaged-record tab: ${e.message}`));
+  await probe.goto(pageUrl); await probe.waitForFunction(() => !!window.studentLab);
+  const notHandled = [];
+  for (const garbage of ["null", "[]", "42", "\"text\"", "{\"testExposed\":1}", "not json"]) {
+    await probe.evaluate(([key, value]) => localStorage.setItem(key, value), [EXPOSURE_KEY, garbage]);
+    await probe.reload();
+    const booted = await probe.waitForFunction(() => document.querySelectorAll("#track option").length > 0 && document.querySelectorAll("#scenario option").length > 0, null, { timeout: 10000 }).then(() => true, () => false);
+    if (!(booted && await probe.evaluate(() => studentLab.testExposed === true) && (await probe.locator("#error").innerText()).includes("cannot be verified"))) notHandled.push(garbage);
+  }
+  check("a_damaged_exposure_record_never_stops_the_page_and_counts_as_exposed", notHandled.length === 0, JSON.stringify(notHandled));
 
   if (keepGoing) failedChecks.push(...errors.map(text => `console or page error: ${text.slice(0, 160)}`)); else assert.deepEqual(errors, []);
   assert.deepEqual(await buildHashes(), testedBuild, "the page files changed while they were being tested");

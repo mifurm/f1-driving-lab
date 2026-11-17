@@ -266,13 +266,17 @@ install("startDagger", async () => {
 }, true);
 install("daggerRollout", async () => {
   const session = dagger();
+  // A rollout consumes the session's random stream and episode numbers. A cancelled or failed one gives them back, so a session replays identically whatever was pressed.
+  const saved = { rng: session.rng.state, episode: session.episode };
   let failed = 0, rejected = 0; const added = [];
-  for (const id of trainingIds) {
-    const part = T.collect({ track: trackMap.get(id), cfg, driver: session.net, rng: session.rng, steps: session.budget, spec: gen.starts.typical, prefix: `d${session.round + 1}`,
-      firstEpisode: session.episode, source: `learner rollout, expert label (round ${session.round + 1})` });
-    session.episode += part.episodes; added.push(...part.rows); failed += part.failures; rejected += part.rejected; await tickYield();
-    if (lab.cancel) throw new Error("Cancelled: nothing was added to the DAgger session.");
-  }
+  try {
+    for (const id of trainingIds) {
+      const part = T.collect({ track: trackMap.get(id), cfg, driver: session.net, rng: session.rng, steps: session.budget, spec: gen.starts.typical, prefix: `d${session.round + 1}`,
+        firstEpisode: session.episode, source: `learner rollout, expert label (round ${session.round + 1})` });
+      session.episode += part.episodes; added.push(...part.rows); failed += part.failures; rejected += part.rejected; await tickYield();
+      if (lab.cancel) throw new Error("Cancelled: nothing was added to the DAgger session.");
+    }
+  } catch (error) { session.rng.state = saved.rng; session.episode = saved.episode; throw error; }
   const newStateLoss = T.modelLoss(session.net, added), validationLoss = T.modelLoss(session.net, session.validation);
   session.pending = { rows: added, failed, rejected, newStateLoss };
   const run = E.simulate(currentTrack(), cfg, session.net, start(), { record: true }), divergence = T.firstDivergence(T.actionErrors(run.trace));

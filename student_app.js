@@ -267,7 +267,7 @@ function mergeStoredExposure() {
   return lab.testExposed !== before[0] || lab.testLabelsExposed !== before[1];
 }
 function setExposure() {
-  mergeStoredExposure();
+  const changed = mergeStoredExposure();
   if (lab.exposureStorage) {
     try {
       localStorage.setItem(EXPOSURE_KEY, JSON.stringify({ testExposed: lab.testExposed, testLabelsExposed: lab.testLabelsExposed }));
@@ -280,12 +280,14 @@ function setExposure() {
   $("testExposure").textContent = lab.testExposed ?
     `Test circuits now exposed. Further retraining/testing is exploratory${lab.testLabelsExposed ? "; test labels were exposed in the leakage lesson" : ""}.` :
     "Three new test circuits are sealed by classroom protocol (not secrecy). Legacy holdouts are not pristine.";
+  // Another tab exposed the circuits: the track list and the reference tables must follow, whether or not the storage event itself reached this tab.
+  if (changed) { fillTracks(); referenceTables(); }
 }
 function restoreExposure() {
   try {
     const raw = localStorage.getItem(EXPOSURE_KEY);
     const stored = raw === null ? { testExposed: false, testLabelsExposed: false } : JSON.parse(raw);
-    if (typeof stored.testExposed !== "boolean" || typeof stored.testLabelsExposed !== "boolean")
+    if (stored === null || typeof stored !== "object" || typeof stored.testExposed !== "boolean" || typeof stored.testLabelsExposed !== "boolean")
       throw new SyntaxError("Invalid exposure record");
     lab.testExposed = stored.testExposed || stored.testLabelsExposed; lab.testLabelsExposed = stored.testLabelsExposed;
     localStorage.setItem(EXPOSURE_KEY, JSON.stringify(stored));
@@ -296,13 +298,8 @@ function restoreExposure() {
   }
   setExposure();
 }
-// Another tab changed the stored record: follow it (the track list and reference tables depend on it). Clearing storage elsewhere un-exposes nothing here.
-window.addEventListener("storage", event => {
-  if (event.key !== null && event.key !== EXPOSURE_KEY) return;
-  const changed = mergeStoredExposure();
-  setExposure();
-  if (changed) { fillTracks(); referenceTables(); }
-});
+// Another tab changed the stored record (key === null: its storage was cleared). Either way this tab merges and re-asserts it, so nothing is ever un-exposed.
+window.addEventListener("storage", event => { if (event.key === null || event.key === EXPOSURE_KEY) setExposure(); });
 
 // ---- manual recording ---------------------------------------------------------------------------------------------------------
 function manualStep() {
@@ -568,13 +565,14 @@ install("downloadCSV", () => {
   download("student-driving-dataset.csv", rows.map(row => row.map(cells).join(",")).join("\r\n"), "text/csv");
 });
 // A file input fires "change" only when the chosen file differs, so retrying the same file (after Clear, or after fixing a rejected file in place) would silently do
-// nothing. Reading the file and then emptying the input makes every selection count; the File object stays readable.
+// nothing. The file is taken and the input emptied before anything else - even when the lab is busy and refuses the action - so every selection counts.
+// The File object stays readable after the input is emptied.
 function onFile(id, action) {
   const input = $(id);
-  input.onchange = () => handle(async () => {
+  input.onchange = () => {
     const file = input.files[0]; input.value = "";
-    if (file) await action(file);
-  });
+    if (file) handle(() => action(file));
+  };
 }
 onFile("importDataset", async file => {
   const imported = JSON.parse(await file.text());
@@ -721,8 +719,6 @@ install("localAblation", async () => {
 install("freezeReveal", async () => {
   const chosen = selectedModel();
   if ($("model").value === "student" && chosen.updates === 0) throw new Error("Train your student model before freezing.");
-  mergeStoredExposure();
-  const alreadyExposed = lab.testExposed;
   lab.frozen = chosen.clone ? chosen.clone() : chosen; const fingerprint = E.fingerprint(lab.frozen), rows = [];
   for (const track of tracks.filter(t => t.id >= 13)) {
     for (const scenario of data.scenarios[track.id]) {
@@ -733,6 +729,8 @@ install("freezeReveal", async () => {
     }
   }
   if (E.fingerprint(lab.frozen) !== fingerprint) throw new Error("Frozen weights changed during testing");
+  // Another tab may have revealed the circuits while this one was evaluating, so ask the stored record now rather than the value this action started with.
+  mergeStoredExposure(); const alreadyExposed = lab.testExposed;
   lab.testExposed = true; fillTracks(); setExposure(); referenceTables();
   lab.frozenAudit = { fingerprint, alreadyExposed, sections: rows.map(r => ({ circuit: r[0], section: r[1], outcome: r[2] })) };
   $("freezeStatus").textContent = `Frozen weights fingerprint ${fingerprint}. Twelve fixed test sections evaluated without weight updates.
