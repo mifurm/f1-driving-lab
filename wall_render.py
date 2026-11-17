@@ -11,7 +11,7 @@ from matplotlib.patches import Polygon
 from matplotlib.transforms import Affine2D
 import numpy as np
 
-from driving import Config, Track, write_json
+from driving import Config, track_from_catalog, write_json
 from multi_render import inventory
 from multitrack import save_csv
 from race_render import car_parts
@@ -182,7 +182,7 @@ def render(output, skip_movies=False, inventory_only=False):
     config = Config(**manifest["config"])
     figure, axes = plt.subplots(4, 4, figsize=(14, 12))
     for axis, item in zip(axes.flat, catalog):
-        track = Track(config, item["knots"])
+        track = track_from_catalog(config, item)
         draw_track(axis, track)
         axis.plot(*track.left.T, color=RED, lw=.7)
         axis.plot(*track.right.T, color=RED, lw=.7)
@@ -195,7 +195,7 @@ def render(output, skip_movies=False, inventory_only=False):
     figure.tight_layout()
     save_figure(figure, output / "visuals", "corner_atlas")
     for item in catalog:
-        render_track(output, item, Track(config, item["knots"]), records,
+        render_track(output, item, track_from_catalog(config, item), records,
                      scenarios[str(item["id"])], manifest, not skip_movies)
         print(f"Rendered wall/corner learning for {item['name']}", flush=True)
     options = "".join(f'<option value="{item["id"]}">{html.escape(item["name"])} / {item["split"]}</option>' for item in catalog)

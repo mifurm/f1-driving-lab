@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from pptx import Presentation
 
-from driving import Config, NeuralDriver, Track, simulate, write_json
+from driving import Config, NeuralDriver, simulate, tracks_from_catalog, write_json
 from multi_render import index_details, load_round, trace_key
 from multitrack import MultiTrackEnvironment
 from verify import DataParser, require
@@ -69,7 +69,7 @@ def verify(output):
     require(manifest["best_round_by_training_completion_then_accuracy"] in range(config.rounds + 1),
             "Invalid training-selected checkpoint")
     record("Final model freeze recorded before unseen testing; frozen model hash unchanged")
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     driver = NeuralDriver.load(output / "models/final.npz")
     require(driver.weights[0].shape[0] == 16 and driver.updates == config.rounds * config.updates_per_round,
             "Incorrect final architecture or optimizer count")

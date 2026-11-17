@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from pptx import Presentation
 
-from driving import NeuralDriver, Track, write_json
+from driving import NeuralDriver, tracks_from_catalog, write_json
 from multi_render import inventory
 from student_experiments import masked, policy, rule
 from wall_sim import WALL_CONFIG, corner_scenarios, wall_simulate
@@ -68,7 +68,7 @@ def verify(output, bundle=False):
     catalog = read(output / "data/circuits.json")
     old = read(Path("wall_artifacts/data/circuits.json"))
     assert catalog[:13] == old
-    tracks = {item["id"]: Track(WALL_CONFIG, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(WALL_CONFIG, catalog)
     assert all(np.min(tracks[i].curvature) < 0 < np.max(tracks[i].curvature) for i in (13, 14, 15))
     replays = 0
     for key in data["models"]:

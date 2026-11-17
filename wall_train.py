@@ -9,7 +9,7 @@ import shutil
 
 import numpy as np
 
-from driving import NeuralDriver, SCENARIOS, Track, write_json
+from driving import NeuralDriver, SCENARIOS, tracks_from_catalog, write_json
 from multitrack import save_csv
 from wall_sim import (
     WALL_COLUMNS, WALL_CONFIG, WallEnvironment, add_margin_feature,
@@ -110,7 +110,7 @@ def train(output, base, rounds=120):
         (output / directory).mkdir(parents=True, exist_ok=True)
     catalog = json.loads((base / "data/circuits.json").read_text())
     write_json(output / "data/circuits.json", catalog)
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     training = [item for item in catalog if item["split"] == "train"]
     holdouts = [item for item in catalog if item["split"] == "holdout"]
     source_model = base / ("data/base_model.npz" if (base / "data/base_model.npz").exists() else "models/final.npz")

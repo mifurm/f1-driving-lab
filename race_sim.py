@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from circuits import CIRCUITS
-from driving import Config, State, Track, wrap_angle
+from driving import Config, NUMERICAL_DIVERGENCE, State, Track, check_action, wrap_angle
 from multitrack import MultiTrackEnvironment
 
 
@@ -71,7 +71,7 @@ def complex_circuits(config=RACE_CONFIG):
             windows.append((center, width))
         knots = points + normals * displacement[:, None]
         knots = np.vstack([knots, knots[0]])
-        track = Track(config, knots)
+        track = Track(config, knots, validate="report")  # derived from the legacy catalog
         tracks[circuit.id] = track
         catalog.append({
             "id": circuit.id, "name": f"{circuit.name} GP-X", "split": circuit.split,
@@ -118,6 +118,9 @@ class RaceEnvironment(MultiTrackEnvironment):
 
     def step(self, action):
         state, config = self.state, self.config
+        action, finite = check_action(action)
+        if not finite:
+            return self.track.locate(state.x, state.y), NUMERICAL_DIVERGENCE, 0.0
         gear = state.gear
         shift_remaining = max(0.0, state.shift_remaining - config.dt)
         cooldown = max(0.0, state.shift_cooldown - config.dt)

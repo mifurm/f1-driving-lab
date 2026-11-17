@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 from pptx import Presentation
 
-from driving import Config, NeuralDriver, SCENARIOS, Track, write_json
+from driving import Config, NeuralDriver, SCENARIOS, tracks_from_catalog, write_json
 from multi_render import inventory
 from race_render import load_attempt
 from race_sim import (
@@ -107,7 +107,7 @@ def verify(output):
     freeze = json.loads((output / "training_complete.json").read_text())
     require(model_hash == freeze["final_model_sha256"] == manifest["final_model_sha256"], "Frozen weights changed")
     require(freeze["holdouts_not_yet_evaluated"] and manifest["holdouts_evaluated_after_freeze"], "Unseen test protocol violated")
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     for number in range(121):
         model = NeuralDriver.load(output / f"models/round_{number:03d}.npz")
         require(model.updates == number * config.updates_per_round, "Incorrect saved model update count")

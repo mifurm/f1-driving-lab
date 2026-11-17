@@ -81,6 +81,10 @@ class Walls:
 class WallEnvironment(RaceEnvironment):
     """No steering shield: the model's controls are applied unchanged."""
 
+    feature_names = RaceEnvironment.feature_names + [
+        "projected_footprint_wall_margin_half_width", "speed_dependent_steering_budget_fraction",
+    ]
+
     def __init__(self, track, config):
         super().__init__(track, config)
         self.walls = Walls(track)
@@ -187,6 +191,3 @@ def wall_simulate(track, config, driver, scenario, goal=150.0):
         "peak_speed_kmh": float(np.max(trace[:, 4]) * 3.6),
         "braking_s": float(np.count_nonzero(trace[:, 9] > .01) * config.dt),
     }, trace
-    feature_names = RaceEnvironment.feature_names + [
-        "projected_footprint_wall_margin_half_width", "speed_dependent_steering_budget_fraction",
-    ]

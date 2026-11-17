@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 from pptx import Presentation
 
-from driving import Config, NeuralDriver, SCENARIOS, Track, write_json
+from driving import Config, NeuralDriver, SCENARIOS, tracks_from_catalog, write_json
 from race_verify import check_telemetry, parse_page
 from verify import require
 from wall_render import load_attempt
@@ -65,7 +65,7 @@ def verify(output):
         require(len(validation["features"]) == 2200, "Validation missing")
         require(not any(row.tobytes() in training_keys for row in validation["features"]), "Action validation leaked")
     passed(f"{len(x):,} recovery examples and 5,632 anchors; balanced aggregation and disjoint validation/layout holdouts")
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     final = NeuralDriver.load(output / "models/final.npz")
     for number in range(121):
         model = NeuralDriver.load(output / f"models/round_{number:03d}.npz")

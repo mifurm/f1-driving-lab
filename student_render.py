@@ -15,7 +15,7 @@ import numpy as np
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
-from driving import NeuralDriver, Track, write_json
+from driving import NeuralDriver, track_from_catalog, write_json
 from student_experiments import export_model, new_catalog
 from wall_sim import WALL_CONFIG, corner_scenarios, footprint, wall_simulate
 
@@ -84,7 +84,7 @@ def curves(data, output):
 
 
 def animation(data, output, catalog):
-    track = Track(WALL_CONFIG, catalog[0]["knots"])
+    track = track_from_catalog(WALL_CONFIG, catalog[0])
     scenario = corner_scenarios(track)[3]
     steps = [0, 128, data["models"]["full_301"]["updates"]]
     traces, metrics = [], []

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from driving import Config, SCENARIOS, Track, write_json
+from driving import Config, SCENARIOS, tracks_from_catalog, write_json
 from wall_sim import wall_simulate
 from wall_train import select_checkpoint
 
@@ -17,7 +17,7 @@ def select(output):
     manifest = json.loads((output / "manifest.json").read_text())
     config = Config(**manifest["config"])
     catalog = json.loads((output / "data/circuits.json").read_text())
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     training = [item for item in catalog if item["split"] == "train"]
     history = json.loads((output / "history.json").read_text())
     model, number = select_checkpoint(output, config, tracks, training, history)

@@ -7,10 +7,83 @@ import math
 
 import numpy as np
 from scipy.interpolate import CubicSpline
+from scipy.spatial import cKDTree
+
+NUMERICAL_DIVERGENCE = "numerical_divergence"
+MAX_LEARNING_RATE = 0.05
+LEARNING_RATE_SCHEDULES = ("constant", "linear", "cosine", "step")
 
 
 def wrap_angle(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def check_action(action):
+    """Return (action, is_finite); a wrongly shaped action is a programming error."""
+    action = np.asarray(action, dtype=float)
+    if action.shape != (2,):
+        raise ValueError(f"Expected a (steering, target-speed) pair, got shape {action.shape}")
+    return action, bool(np.isfinite(action).all())
+
+
+def learning_rate_at(schedule, base, update, total):
+    """Learning rate used by 1-based `update` of `total` planned updates."""
+    if schedule not in LEARNING_RATE_SCHEDULES:
+        raise ValueError(f"Unknown learning-rate schedule {schedule!r}")
+    progress = (update - 1) / (total - 1) if total > 1 else 0.0
+    if schedule == "constant":
+        return base
+    if schedule == "linear":
+        return base * (1 - 0.9 * progress)
+    if schedule == "cosine":
+        return base * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress)))
+    return base * 0.5 ** min(2, math.floor(3 * progress))
+
+
+def _segments_cross(p, q, r, s):
+    """Strict proper crossing of segment p-q with segment r-s, vectorised."""
+    def orientation(a, b, c):
+        return (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+    return (orientation(p, q, r) * orientation(p, q, s) < 0) & (orientation(r, s, p) * orientation(r, s, q) < 0)
+
+
+def circuit_geometry_report(xy, left, right, curvature, ds, track_width):
+    """Physical validity of a closed circuit; `problems` is empty for a drivable road."""
+    n, half_width = len(xy), track_width / 2
+    max_curvature = float(np.max(np.abs(curvature)))
+    min_radius = math.inf if max_curvature == 0 else 1 / max_curvature
+    problems = []
+    if min_radius <= half_width:
+        problems.append(f"tightest bend has radius {min_radius:.1f} m, not larger than half the road "
+                        f"width ({half_width:.1f} m), so the inner wall folds over")
+    starts, ends = np.vstack([left, right]), np.vstack([np.roll(left, -1, axis=0), np.roll(right, -1, axis=0)])
+    wall, index = np.repeat([0, 1], n), np.tile(np.arange(n), 2)
+    reach = float(np.max(np.linalg.norm(ends - starts, axis=1))) + 1e-9
+    pairs = cKDTree((starts + ends) / 2).query_pairs(r=reach, output_type="ndarray")
+    crossings = 0
+    if len(pairs):
+        a, b = pairs[:, 0], pairs[:, 1]
+        apart = np.abs(index[a] - index[b])
+        neighbours = (wall[a] == wall[b]) & (np.minimum(apart, n - apart) <= 1)
+        a, b = a[~neighbours], b[~neighbours]
+        crossings = int(np.count_nonzero(_segments_cross(starts[a], ends[a], starts[b], ends[b])))
+    if crossings:
+        problems.append(f"the road edges cross themselves or each other at {crossings} places "
+                        "(self-intersecting or overlapping circuit)")
+    exclusion = max(3 * track_width, 60.0)
+    separation = math.inf
+    close = cKDTree(xy).query_pairs(r=2 * track_width, output_type="ndarray")
+    if len(close):
+        apart = np.abs(close[:, 0] - close[:, 1])
+        distant = np.minimum(apart, n - apart) * ds > exclusion
+        if distant.any():
+            gaps = np.linalg.norm(xy[close[distant, 0]] - xy[close[distant, 1]], axis=1)
+            separation = float(np.min(gaps))
+    if separation < track_width:
+        problems.append(f"two parts of the road more than {exclusion:.0f} m apart along the track come within "
+                        f"{separation:.1f} m, closer than the road width ({track_width:.1f} m)")
+    return {"min_radius_m": min_radius, "edge_crossings": crossings,
+            "min_separation_m": None if math.isinf(separation) else separation, "problems": problems}
 
 
 @dataclass(frozen=True)
@@ -36,7 +109,15 @@ class Config:
 
 
 class Track:
-    def __init__(self, config, knots=None):
+    """Closed circuit. `validate` is "error" (reject physically invalid geometry) or "report"
+    (keep the geometry and describe its problems in `self.geometry`). The default Apex Park
+    and the legacy catalog (see `tracks_from_catalog`) use "report" so earlier results stay
+    reproducible; any other knots are validated strictly unless the caller says otherwise."""
+
+    def __init__(self, config, knots=None, validate=None):
+        if validate not in (None, "error", "report"):
+            raise ValueError("validate must be 'error' or 'report'")
+        validate = validate or ("report" if knots is None else "error")
         self.config = config
         default_knots = [
             [0, -140], [140, -140], [220, -80], [210, 0],
@@ -71,6 +152,10 @@ class Track:
         ) / (2 * self.ds)
         self.left = self.xy + self.normal * config.track_width / 2
         self.right = self.xy - self.normal * config.track_width / 2
+        self.geometry = circuit_geometry_report(
+            self.xy, self.left, self.right, self.curvature, self.ds, config.track_width)
+        if self.geometry["problems"] and validate == "error":
+            raise ValueError("Invalid circuit geometry: " + "; ".join(self.geometry["problems"]))
 
     def point(self, distance):
         fractional = (distance % self.length) / self.ds
@@ -102,6 +187,21 @@ class Track:
     def save(self, path):
         np.savez_compressed(path, xy=self.xy, left=self.left, right=self.right,
                             s=self.s, curvature=self.curvature, length=self.length)
+
+
+# Circuits 0-12 predate geometry validation. Apex Park (0) and Square Sprint (6), and their
+# GP-X variants, have small inner-wall loops at bends tighter than half the road width.
+# They are kept unchanged so every saved result stays reproducible.
+LEGACY_CIRCUIT_IDS = frozenset(range(13))
+
+
+def track_from_catalog(config, item):
+    mode = "report" if item["id"] in LEGACY_CIRCUIT_IDS else "error"
+    return Track(config, item["knots"], validate=mode)
+
+
+def tracks_from_catalog(config, catalog):
+    return {item["id"]: track_from_catalog(config, item) for item in catalog}
 
 
 @dataclass
@@ -178,6 +278,9 @@ class Environment:
     def step(self, action):
         config = self.config
         state = self.state
+        action, finite = check_action(action)
+        if not finite:
+            return self.track.locate(state.x, state.y), NUMERICAL_DIVERGENCE, 0.0
         requested_steer = float(np.clip(action[0], -1, 1) * config.max_steer)
         target_speed = float(np.clip((action[1] + 1) * config.max_speed / 2, 0, config.max_speed))
         steering = state.steering + float(np.clip(
@@ -221,6 +324,8 @@ class NeuralDriver:
         self.first = [np.zeros_like(item) for item in self.parameters]
         self.second = [np.zeros_like(item) for item in self.parameters]
         self.updates = 0
+        self.last_gradient_norm = 0.0
+        self.last_clipped = False
 
     def predict(self, features):
         value = np.asarray(features)
@@ -228,7 +333,21 @@ class NeuralDriver:
             value = np.tanh(value @ weight + bias)
         return value
 
-    def train_batch(self, features, targets, learning_rate):
+    def train_batch(self, features, targets, learning_rate, weight_decay=0.0, max_grad_norm=None):
+        """One Adam update on a minibatch; returns the weighted mean squared error.
+
+        `weight_decay` is decoupled (AdamW-style) and applies to weights, not biases.
+        `max_grad_norm` rescales the whole gradient when its global L2 norm is larger.
+        Non-finite inputs, loss or gradients raise before any parameter changes.
+        """
+        if not (math.isfinite(learning_rate) and 0 < learning_rate <= MAX_LEARNING_RATE):
+            raise ValueError(f"learning_rate must be in (0, {MAX_LEARNING_RATE}], got {learning_rate!r}")
+        if not (math.isfinite(weight_decay) and 0 <= weight_decay <= 1):
+            raise ValueError(f"weight_decay must be in [0, 1], got {weight_decay!r}")
+        if max_grad_norm is not None and not (math.isfinite(max_grad_norm) and max_grad_norm > 0):
+            raise ValueError(f"max_grad_norm must be positive and finite, got {max_grad_norm!r}")
+        if not (np.isfinite(features).all() and np.isfinite(targets).all()):
+            raise ValueError("Training batch contains NaN or infinite values")
         activations = [features]
         for weight, bias in zip(self.weights, self.biases):
             activations.append(np.tanh(activations[-1] @ weight + bias))
@@ -244,12 +363,24 @@ class NeuralDriver:
             bias_gradient = np.sum(gradient, axis=0)
             gradients[0:0] = [weight_gradient, bias_gradient]
             gradient = gradient @ self.weights[layer].T
+        norm = float(np.sqrt(sum(float(np.sum(item * item)) for item in gradients)))
+        if not (math.isfinite(loss) and math.isfinite(norm)):
+            raise FloatingPointError(
+                f"Non-finite loss or gradient at update {self.updates + 1}; parameters were left "
+                "unchanged. Lower the learning rate or check the training data.")
+        self.last_gradient_norm = norm
+        self.last_clipped = max_grad_norm is not None and norm > max_grad_norm
+        scale = max_grad_norm / norm if self.last_clipped else 1.0
         self.updates += 1
         for index, (parameter, derivative) in enumerate(zip(self.parameters, gradients)):
+            if self.last_clipped:
+                derivative = derivative * scale
             self.first[index] = 0.9 * self.first[index] + 0.1 * derivative
             self.second[index] = 0.999 * self.second[index] + 0.001 * derivative ** 2
             first = self.first[index] / (1 - 0.9 ** self.updates)
             second = self.second[index] / (1 - 0.999 ** self.updates)
+            if weight_decay and index % 2 == 0:
+                parameter -= learning_rate * weight_decay * parameter
             parameter -= learning_rate * first / (np.sqrt(second) + 1e-8)
         return loss
 

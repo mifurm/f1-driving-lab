@@ -9,7 +9,7 @@ import shutil
 
 import numpy as np
 
-from driving import NeuralDriver, Track, write_json
+from driving import NeuralDriver, tracks_from_catalog, write_json
 from race_sim import RaceEnvironment
 from wall_sim import WALL_CONFIG, WallEnvironment, add_margin_feature, corner_scenarios, wall_simulate
 
@@ -110,7 +110,7 @@ def prepare(output, base):
     config = WALL_CONFIG
     old = json.loads((base / "data/circuits.json").read_text())
     catalog = new_catalog(config, old)
-    tracks = {item["id"]: Track(config, item["knots"]) for item in catalog}
+    tracks = tracks_from_catalog(config, catalog)
     for item in catalog[13:]:
         for scenario in corner_scenarios(tracks[item["id"]]):
             result, _ = wall_simulate(tracks[item["id"]], config, None, scenario)

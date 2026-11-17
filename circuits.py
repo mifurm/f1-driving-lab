@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from driving import Track
+from driving import LEGACY_CIRCUIT_IDS, Track
 
 
 def close(points):
@@ -30,7 +30,7 @@ class Circuit:
     knots: np.ndarray | None
 
     def build(self, config):
-        return Track(config, self.knots)
+        return Track(config, self.knots, validate="report" if self.id in LEGACY_CIRCUIT_IDS else "error")
 
 
 CIRCUITS = [

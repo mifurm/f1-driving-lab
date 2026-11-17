@@ -12,7 +12,7 @@ from matplotlib.transforms import Affine2D
 import matplotlib.pyplot as plt
 
 from circuits import CIRCUITS
-from driving import Config, Track, write_json
+from driving import Config, track_from_catalog, write_json
 from multi_render import inventory
 from multitrack import save_csv
 from render import BLUE, GOLD, MUTED, PANEL, RED, TEAL, WHITE, draw_track, presentation, save_figure
@@ -317,7 +317,7 @@ def render(output, skip_movies=False, inventory_only=False, deck_only=False):
     config = Config(**manifest["config"])
     figure, axes = plt.subplots(4, 4, figsize=(14, 12))
     for axis, item in zip(axes.flat, catalog):
-        track = Track(config, item["knots"])
+        track = track_from_catalog(config, item)
         draw_track(axis, track)
         base = CIRCUITS[item["id"]].build(config)
         axis.plot(*(base.xy * 1.15).T, color=MUTED, ls=":", lw=0.8)
@@ -330,7 +330,7 @@ def render(output, skip_movies=False, inventory_only=False, deck_only=False):
     save_figure(figure, output / "visuals", "complex_track_atlas", svg=True)
     movie_rounds = {}
     for item in catalog:
-        track = Track(config, item["knots"])
+        track = track_from_catalog(config, item)
         records = all_records[item["id"]]
         charts(output, item, track, records, load_attempt(output, item, 120))
         make_page(output, item, track, records, rollout_metrics, manifest)
