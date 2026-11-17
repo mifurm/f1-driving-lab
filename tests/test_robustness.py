@@ -6,7 +6,7 @@ import numpy as np
 from circuits import CIRCUITS
 from driving import (
     Config, Environment, LEARNING_RATE_SCHEDULES, MAX_LEARNING_RATE, NUMERICAL_DIVERGENCE,
-    NeuralDriver, SCENARIOS, Track, learning_rate_at, simulate, tracks_from_catalog,
+    NeuralDriver, SCENARIOS, Track, learning_rate_at, sample_index, simulate, tracks_from_catalog,
 )
 from multitrack import MultiTrackEnvironment
 from race_sim import RACE_CONFIG, RaceEnvironment, complex_circuits, race_simulate
@@ -228,6 +228,35 @@ class CircuitValidationTests(unittest.TestCase):
             tracks_from_catalog(Config(), [{"id": 13, "knots": knots}])
         tracks = tracks_from_catalog(Config(), [{"id": 5, "knots": knots}])
         self.assertTrue(tracks[5].geometry["problems"])
+
+
+class CurvatureLookupTests(unittest.TestCase):
+    """The curvature inputs are piecewise constant; rounding noise must not decide which sample is read."""
+
+    def test_sample_boundaries_belong_to_the_sample_that_starts_there_whatever_the_rounding(self):
+        for boundary in (1.0, 354.0, 1000.0):
+            noisy = np.array([np.nextafter(boundary, 0), boundary, np.nextafter(boundary, np.inf)])
+            self.assertEqual(sample_index(noisy, 4000).tolist(), [int(boundary)] * 3)
+        self.assertEqual(int(sample_index(1000.0 - 1e-6, 1000)), 999)
+        self.assertEqual(int(sample_index(1000.0 - 1e-12, 1000)), 0, "the lap end wraps to sample 0")
+
+    def test_observation_and_expert_do_not_depend_on_one_ulp_of_distance_at_a_vertex(self):
+        track = Track(WALL_CONFIG)
+        environment = WallEnvironment(track, WALL_CONFIG)
+        environment.state = environment.make_state(0.3, 7.0, 0.2, 12.0)
+        features, (distance, lateral, heading) = environment.observe()
+        vertex = round(distance / track.ds) * track.ds
+        results = []
+        for noisy in (np.nextafter(vertex, 0), vertex, np.nextafter(vertex, np.inf)):
+            original = track.locate
+            track.locate = lambda x, y, d=noisy: (d, lateral, heading)
+            try:
+                observed, location = environment.observe()
+                results.append((observed[13:16].tolist(), environment.teacher(location=location).tolist()))
+            finally:
+                track.locate = original
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[1], results[2])
 
 
 class FeatureNameTests(unittest.TestCase):

@@ -9,6 +9,9 @@
   const clip = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const mod = (v, n) => ((v % n) + n) % n;
   const wrap = v => mod(v + Math.PI, 2 * Math.PI) - Math.PI;
+  // Mirrors driving.sample_index: a position within 1e-9 samples of a boundary belongs to the sample that starts there, so one ulp of
+  // rounding noise cannot flip a piecewise-constant curvature input (this differs between libm builds and between engines).
+  const sampleIndex = (position, n) => Math.floor(position + 1e-9) % n;
   const copy = value => JSON.parse(JSON.stringify(value));
   function finite(value, name) {
     if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${name} must be finite`);
@@ -317,8 +320,8 @@
         const p = this.track.point(distance + ahead), dx = p[0] - state.x, dy = p[1] - state.y;
         features.push((dx * c + dy * s) / ahead, (-dx * s + dy * c) / ahead);
       }
-      const indices = Array.from({ length: 22 }, (_, i) => Math.floor(mod(distance + i * 3, this.track.length) / this.track.ds));
-      const lookahead = Math.floor(mod(distance + 8 + .45 * state.speed, this.track.length) / this.track.ds);
+      const indices = Array.from({ length: 22 }, (_, i) => sampleIndex(mod(distance + i * 3, this.track.length) / this.track.ds, this.track.n));
+      const lookahead = sampleIndex(mod(distance + 8 + .45 * state.speed, this.track.length) / this.track.ds, this.track.n);
       features.push(this.track.curvature[indices[0]] / .05,
         Math.max(...indices.map(i => Math.abs(this.track.curvature[i]))) / .05, this.track.curvature[lookahead] / .05);
       return { features: derived(features, cfg), location };
@@ -331,7 +334,7 @@
         return clip(Math.atan2(2 * cfg.wheelbase * left, dx ** 2 + dy ** 2), -cfg.max_steer, cfg.max_steer);
       };
       let steer = steeringAt(8 + .45 * state.speed);
-      const curvature = Math.max(...Array.from({ length: 22 }, (_, i) => Math.abs(this.track.curvature[Math.floor(mod(distance + i * 3, this.track.length) / this.track.ds)])));
+      const curvature = Math.max(...Array.from({ length: 22 }, (_, i) => Math.abs(this.track.curvature[sampleIndex(mod(distance + i * 3, this.track.length) / this.track.ds, this.track.n)])));
       let target = clip(Math.min(Math.sqrt(3.5 / Math.max(curvature, .003)),
         Math.sqrt(4.5 * cfg.wheelbase / Math.max(Math.abs(Math.tan(steer)), .005)), 32), 6, cfg.max_speed);
       const edge = Math.abs(location[1]), error = wrap(state.heading - location[2]);
@@ -480,5 +483,5 @@
     return (hash >>> 0).toString(16).padStart(8, "0");
   }
   return { version, compatibleVersions, RNG, Network, Track, Environment, featureMasks, maskFeatures, derived, validateRows,
-    simulate, noisyFeatures, rule, footprint, clip, wrap, meanSD, fingerprint };
+    simulate, noisyFeatures, rule, footprint, clip, wrap, sampleIndex, meanSD, fingerprint };
 });

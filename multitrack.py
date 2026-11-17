@@ -12,7 +12,7 @@ import numpy as np
 from circuits import CIRCUITS, HOLDOUT_CIRCUITS, TRAINING_CIRCUITS
 from driving import (
     Config, Environment, NeuralDriver, SCENARIOS, collect_initial_data,
-    simulate, write_json,
+    sample_index, simulate, write_json,
 )
 
 
@@ -35,9 +35,9 @@ class MultiTrackEnvironment(Environment):
         features, location = super().observe(state)
         distance = location[0]
         preview = distance + np.arange(0, 66, 3)
-        indices = np.floor((preview % self.track.length) / self.track.ds).astype(int)
+        indices = sample_index((preview % self.track.length) / self.track.ds, self.track.n)
         lookahead = distance + 8.0 + 0.45 * state.speed
-        lookahead_index = int((lookahead % self.track.length) / self.track.ds)
+        lookahead_index = int(sample_index((lookahead % self.track.length) / self.track.ds, self.track.n))
         geometry = np.array([
             self.track.curvature[indices[0]],
             np.max(np.abs(self.track.curvature[indices])),

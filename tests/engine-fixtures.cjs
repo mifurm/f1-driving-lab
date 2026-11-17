@@ -233,6 +233,40 @@ test("Every data strategy gets the same labelled-state budget and update budget,
   await assert.rejects(() => T.runArm({ arm: "magic", ...setup }), /Unknown data strategy/);
 });
 
+test("Curvature inputs and the expert do not flip on one ulp of distance at a sample boundary", () => {
+  const track = tracks.get(1), env = new E.Environment(track, cfg);
+  env.reset({ fraction: .3, lateral: 7, heading_error: .2, speed: 12 });
+  const { location } = env.observe(), vertex = Math.round(location[0] / track.ds) * track.ds;
+  const neighbour = (value, step) => { const view = new BigInt64Array(new Float64Array([value]).buffer); view[0] += BigInt(step); return new Float64Array(view.buffer)[0]; };
+  const results = [neighbour(vertex, -1), vertex, neighbour(vertex, 1)].map(distance => {
+    const original = track.locate;
+    track.locate = () => [distance, location[1], location[2]];
+    try { return { curvature: env.observe().features.slice(13, 16), expert: env.teacher() }; } finally { track.locate = original; }
+  });
+  assert.notEqual(neighbour(vertex, -1), vertex);
+  assert.deepEqual(results[0], results[1]); assert.deepEqual(results[2], results[1]);
+  assert.deepEqual([E.sampleIndex(354 - 1e-13, 4000), E.sampleIndex(354, 4000), E.sampleIndex(1000 - 1e-12, 1000), E.sampleIndex(1000 - 1e-6, 1000)], [354, 354, 0, 999]);
+});
+
+test("The coverage experiment pairs seeds across recipes, keeps nominal and recovery apart, is reproducible and cancellable", async () => {
+  const data = { scenarios: Object.fromEntries([1, 3].map(id => [id, expected.tracks.find(t => t.id === id).scenarios])) };
+  const setup = { data, ctx, arms: ["bc_narrow", "dagger"], seedCount: 2, budget: 30, rounds: 1, updatesPerRound: 8, trainIds: [1, 3], validIds: [1, 3], holdoutIds: [1] };
+  const run = await T.coverageExperiment(setup);
+  assert.deepEqual(Object.keys(run.results), ["bc_narrow", "dagger"]);
+  assert.equal(run.trainSections.length, 8); assert.equal(run.holdSections.length, 4);
+  for (const results of Object.values(run.results)) {
+    assert.deepEqual(results.map(r => r.seed), [601, 602]);
+    for (const r of results) assert.ok([r.nominal, r.recovery, r.hold, r.overall].every(v => v >= 0 && v <= 1) && r.diverged === false && r.labelled === 30 * 2 * 2);
+  }
+  assert.equal(run.comparisons.length, 1, "only comparisons between recipes that were run are reported");
+  const [pair] = run.comparisons;
+  assert.deepEqual([pair.a, pair.b], ["dagger", "bc_narrow"]); assert.equal(pair.overall.wins + pair.overall.losses + pair.overall.ties, 2);
+  assert.ok(run.keep.dagger.rows.length > 0 && run.keep.dagger.visited.length > 0 && run.expert.train.nominal.n === 4);
+  const again = await T.coverageExperiment(setup);
+  assert.deepEqual(again.results, run.results);
+  await assert.rejects(() => T.coverageExperiment({ ...setup, shouldCancel: () => true }), /Cancelled/);
+});
+
 test("Projected occupancy needs several rows from distinct episodes; coverage grids and tallies describe what was driven", () => {
   const strict = T.supportIndex(rows, cfg), lenient = T.supportIndex(rows, cfg, { minRows: 1, minEpisodes: 1 });
   assert.ok(lenient.size > 0 && lenient.size <= rows.length && strict.size <= lenient.size);

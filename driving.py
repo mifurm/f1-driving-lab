@@ -18,6 +18,19 @@ def wrap_angle(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
+SAMPLE_SNAP = 1e-9
+
+
+def sample_index(position, n):
+    """Centreline sample that holds `position`, measured in units of the sample spacing.
+
+    The curvature inputs are piecewise constant, so a position that is an exact multiple of the spacing
+    (for example a car whose nearest road point is a centreline vertex) must not flip to the neighbouring
+    sample because of one ulp of rounding noise, which differs between libm builds and between the Python
+    and JavaScript engines. Positions within SAMPLE_SNAP of a boundary belong to the sample that starts there."""
+    return np.floor(np.asarray(position) + SAMPLE_SNAP).astype(int) % n
+
+
 def check_action(action):
     """Return (action, is_finite); a wrongly shaped action is a programming error."""
     action = np.asarray(action, dtype=float)
@@ -267,7 +280,7 @@ class Environment:
         steer = np.arctan2(2 * config.wheelbase * left, np.dot(delta, delta))
         steer = float(np.clip(steer, -config.max_steer, config.max_steer))
         preview = distance + np.arange(0, 66, 3)
-        indices = np.floor((preview % self.track.length) / self.track.ds).astype(int)
+        indices = sample_index((preview % self.track.length) / self.track.ds, self.track.n)
         curvature = float(np.max(np.abs(self.track.curvature[indices])))
         road_speed = np.sqrt(3.5 / max(curvature, 0.003))
         recovery_speed = np.sqrt(4.5 * config.wheelbase / max(abs(np.tan(steer)), 0.005))

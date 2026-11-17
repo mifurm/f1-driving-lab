@@ -140,7 +140,7 @@
       if (visited) for (const s of result.trace) {
         const [distance] = track.locate(s.x, s.y);
         visited.push({ lateral: s.lateral, heading: s.headingError, speed: s.speed, kind: section.kind,
-          curvature: track.curvature[Math.floor(distance / track.ds) % track.n] / CURVATURE_SCALE });
+          curvature: track.curvature[E.sampleIndex(distance / track.ds, track.n)] / CURVATURE_SCALE });
       }
     }
     return { rows, visited, ...tally(rows) };
@@ -272,6 +272,7 @@
     const states = kind ? visited.filter(s => s.kind === kind) : visited;
     return states.length ? states.filter(s => support.has(cell(s.lateral, s.heading, s.speed, s.curvature))).length / states.length : null;
   }
+  const inSupport = (support, state) => support.has(cell(state.lateral, state.heading, state.speed, state.curvature));
   function coverageGrid(points, { xRange, yRange, xBins, yBins }) {
     const counts = new Uint32Array(xBins * yBins);
     for (const [x, y] of points) {
@@ -305,8 +306,13 @@
       }
       return { added, failed, rejected };
     };
-    const train = (net, updates) => fit({ seed, mask, train: rows, updates, batchSize, learningRate, initial: net, evalEvery: updates, lossSample: 256,
-      rngSeed: seed + 100 + net.updates, shouldCancel });
+    let diverged = false;
+    const train = async (net, updates) => {
+      const result = await fit({ seed, mask, train: rows, updates, batchSize, learningRate, initial: net, evalEvery: updates, lossSample: 256,
+        rngSeed: seed + 100 + net.updates, shouldCancel });
+      if (result.stopped === "diverged") diverged = true;
+      return result;
+    };
     let net = new Network(seed, sizes, mask);
     if (arm === "dagger" || arm === "bc_staged") {
       const initial = await gather("expert", starts.narrow, budget, "r0", "expert demonstration (round 0)");
@@ -328,7 +334,37 @@
       net = (await train(net, updatesPerRound * (rounds + 1))).net;
       log.push({ round: 0, ...got, size: rows.length });
     }
-    return { arm, seed, net, rows, rounds: log };
+    return { arm, seed, net, rows, rounds: log, diverged };
+  }
+
+  // The whole coverage-lab experiment as one function, so the browser and the headless reference run share exactly the same code.
+  // Every recipe gets the same labelled-state budget per track and the same number of updates; nominal and recovery sections stay separate.
+  async function coverageExperiment({ data, ctx, arms, seedBase = 601, seedCount, budget, rounds, updatesPerRound, trainIds, validIds, holdoutIds,
+      yieldFn = noYield, shouldCancel = null, onRun = null }) {
+    const trainSections = sectionsFor(data, validIds), holdSections = sectionsFor(data, holdoutIds);
+    const expertTrain = evaluateSections("expert", trainSections, ctx, { visited: true }), expertHold = evaluateSections("expert", holdSections, ctx);
+    const results = Object.fromEntries(arms.map(arm => [arm, []])), keep = {}, rng = new RNG(41);
+    for (const arm of arms) for (let i = 0; i < seedCount; i++) {
+      const seed = seedBase + i;
+      const run = await runArm({ arm, seed, ctx, trackIds: trainIds, budget, rounds, updatesPerRound, yieldFn, shouldCancel });
+      if (shouldCancel?.()) throw new Error("Cancelled: no result was recorded.");
+      const ev = evaluateSections(run.net, trainSections, ctx, { visited: true }), hold = evaluateSections(run.net, holdSections, ctx), support = supportIndex(run.rows, ctx.cfg);
+      results[arm].push({ seed, nominal: ev.nominal.k / ev.nominal.n, recovery: ev.recovery.k / ev.recovery.n, hold: hold.k / hold.n, overall: ev.k / ev.n,
+        supportReference: supportFraction(expertTrain.visited, support), supportVisited: supportFraction(ev.visited, support),
+        failed: run.rounds.reduce((n, r) => n + r.failed, 0), rejected: run.rounds.reduce((n, r) => n + r.rejected, 0), diverged: run.diverged, labelled: run.rows.length, updates: run.net.updates });
+      if (i === 0) keep[arm] = { rows: run.rows, visited: ev.visited.filter((_, k) => k % 6 === 0).map(s => ({ ...s, supported: inSupport(support, s) })) };
+      onRun?.({ arm, seed, ev, hold });
+      await yieldFn();
+    }
+    const summaries = arms.map(arm => {
+      const r = results[arm], s = key => summarizeSeeds(r.map(x => x[key]), rng);
+      return { arm, nominal: s("nominal"), recovery: s("recovery"), hold: s("hold"), overall: s("overall"), supportReference: average(r.map(x => x.supportReference)),
+        supportVisited: average(r.map(x => x.supportVisited)), failed: r.reduce((n, x) => n + x.failed, 0), rejected: r.reduce((n, x) => n + x.rejected, 0), diverged: r.filter(x => x.diverged).length };
+    });
+    const comparisons = [["dagger", "bc_staged"], ["dagger", "bc_narrow"], ["bc_broad", "bc_narrow"], ["bc_staged", "bc_narrow"]].filter(([a, b]) => results[a] && results[b]).map(([a, b]) => ({
+      a, b, overall: pairedDifference(results[a].map(x => x.overall), results[b].map(x => x.overall), rng), recovery: pairedDifference(results[a].map(x => x.recovery), results[b].map(x => x.recovery), rng) }));
+    return { settings: { arms, budget, rounds, updatesPerRound, seeds: seedCount, seedBase }, results, summaries, comparisons, trainSections, holdSections,
+      expert: { train: expertTrain, hold: expertHold }, keep };
   }
 
   // ---- paired experiments (controllers, robustness, worksheets) ---------------------------------------------------------
@@ -483,7 +519,7 @@
 
   return { Z95, wilson, quantile, bootstrapMean, signTest, pairedDifference, summarizeSeeds, learningRateAt, modelLoss, fit,
     sectionsFor, evaluateSections, tally, RidgeModel, KNNModel, defaultStarts, sampleStart, collect, supportIndex, supportFraction,
-    coverageGrid, featurePoint, arms, runArm, pairedStart, randomSections, runConditions, summarizeConditions, actionErrors,
+    coverageGrid, featurePoint, arms, runArm, coverageExperiment, pairedStart, randomSections, runConditions, summarizeConditions, actionErrors,
     firstDivergence, snapshotFromRow, expertRecovery, defaultFeatureGroups, permutationImportance,
-    startsAreNearDuplicates, findSplitLeak, validateEpisodeStarts };
+    startsAreNearDuplicates, findSplitLeak, validateEpisodeStarts, inSupport };
 });
