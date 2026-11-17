@@ -15,12 +15,13 @@ import numpy as np
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
-from driving import NeuralDriver, track_from_catalog, write_json
-from student_experiments import ABLATION_SEEDS, MASKS, export_model, new_catalog
+from driving import NeuralDriver, track_from_catalog, tracks_from_catalog, write_json
+from student_experiments import ABLATION_SEEDS, JOURNEY_PRIVATE, MASKS, export_model, lap, new_catalog
 from wall_sim import WALL_CONFIG, corner_scenarios, footprint, wall_simulate
 
 KIT_PATH = Path("teaching_kit.json")
-SCRIPTS = (("student_engine.js", "engine.js"), ("student_tools.js", "tools.js"), ("student_app.js", "app.js"), ("student_labs.js", "labs.js"))
+SCRIPTS = (("student_engine.js", "engine.js"), ("student_tools.js", "tools.js"), ("student_rl.js", "rl.js"), ("student_journey.js", "journey.js"),
+           ("student_app.js", "app.js"), ("student_labs.js", "labs.js"), ("student_journey_ui.js", "journey_ui.js"))
 MASK_NAMES = {"full": "All inputs", "no_future_geometry": "No previews/curvature", "no_heading": "No direct heading", "no_margin": "No margin"}
 COLORS = {"full": "#4de2c2", "no_future_geometry": "#ff8990", "no_heading": "#76a9ff", "no_margin": "#ffc56b"}
 
@@ -205,7 +206,8 @@ the recovery-stress set has {manifest['stress_samples']:,} states from {manifest
                      + "".join(f"<p><strong>Worksheet — {esc(w['title'])}:</strong> {esc(w['prompt'])}</p><p>Hypothesis / settings / evidence / conclusion:</p><div class='response'></div>" for w in worksheets.get(module["id"], []))
                      + "</section>")
     parts.append(f"<section><h2>Suggested sessions</h2><p>The modules total about {total} minutes. Two 90-minute sessions work well: (1) modules 1-4 and 6; "
-                 "(2) modules 5, 7, 8, 9 and 10, finishing with module 11 and the post-lesson concept check. "
+                 "(2) modules 5, 7, 8, 9 and 10, finishing with module 11 and the post-lesson concept check. Module 12 (about 35 minutes; it needs modules 2 and 7) makes a good third session "
+                 "or a closing demonstration: training both learners takes about a minute, so start the reinforcement run, discuss the filmstrip while it trains, then play the learning movie. "
                  "Use the pre/post quiz as a conversation starter; the class dashboard aggregates the cards students download.</p></section>")
     parts.append("<section><h2>Rubric for guided experiments</h2><table><tr><th>Criterion</th>" + "".join(f"<th>{esc(l)}</th>" for l in kit["rubric"]["levels"]) + "</tr>" + "".join(
         f"<tr><td><strong>{esc(c['name'])}</strong></td>" + "".join(f"<td>{esc(d)}</td>" for d in c["descriptors"]) + "</tr>" for c in kit["rubric"]["criteria"]) + "</table></section>")
@@ -253,14 +255,14 @@ def coverage_reading(summary):
     return lines
 
 
-def results_markdown(data, manifest, coverage, output):
+def results_markdown(data, manifest, coverage, journey, output):
     valid = set(manifest["valid_training_tracks"])
     train_rows = [r for r in data["ablations"] if r["split"] == "train" and r["track_id"] in valid]
     sealed = [r for r in data["ablations"] if r["split"] == "pristine_test"]
     seeds = manifest["ablation_seeds"]
     lines = [f"""# Student ML Driving Lab (version 2)
 
-Open `student_v2_artifacts/index.html` for the eleven interactive modules, `teacher_guide.html` for objectives, rubric, answer key and printable worksheets, and
+Open `student_v2_artifacts/index.html` for the twelve interactive modules (module 12 takes an imitation learner and a reinforcement learner from an untrained car to a whole lap), `teacher_guide.html` for objectives, rubric, answer key and printable worksheets, and
 `class_dashboard.html` to aggregate students' results cards. The first eight-module lab is preserved unchanged in `student_artifacts/`.
 
 ## What changed and why
@@ -306,6 +308,14 @@ Version 2 draws training and validation as **different expert episodes from the 
     if coverage:
         lines += ["", "## Data coverage and DAgger (headless run of the browser engine)", "", coverage["text"], "", "Reading of this run (generated from the numbers above):", "",
                   *coverage_reading(coverage["data"]["summary"])]
+    if journey:
+        lines += ["", "## From zero to a lap: imitation versus reinforcement learning (headless run of the browser engine)", "",
+                  "Module 12 trains both learners on one circuit and, after every stage of training, drives one whole lap from the start line with no help. "
+                  "Reinforcement learning is a PPO actor-critic with the same 18-24-16-2 policy network, trained from a reward only (no expert labels).", "", journey["text"], "",
+                  "Reading of this run (generated from the numbers above):", "", *journey_reading(journey["data"]), "",
+                  "![A lap attempt at each stage of training](student_v2_artifacts/visuals/journey_filmstrip.png)", "",
+                  "![The learning movie: each stage drives its whole lap, imitation left and reinforcement right](student_v2_artifacts/visuals/journey_learning.gif)", "",
+                  "![Learning curves, steering smoothness and driving needed on every circuit](student_v2_artifacts/visuals/journey_curves.png)"]
     expert = manifest["data_generation"]["expert_reliability"]
     lines += ["", "## Honest boundaries", "",
               f"- The expert is a heuristic: {expert['typical_episodes_ended_early']} of {manifest['training_episodes'] + manifest['validation_episodes']} typical episodes and {expert['stress_episodes'] - expert['stress_completed_150_steps']} of {expert['stress_episodes']} stress drives ended early because the expert itself tripped a limit. A learner cannot exceed its labels.",
@@ -313,10 +323,15 @@ Version 2 draws training and validation as **different expert episodes from the 
               "- Fixed sections give exact counts; trials inside a section are clustered, so intervals use sections (or seeds) as the unit of replication. Development pools (monitor and the 36 fixed sections) are exploratory.",
               "- Grip is a hard threshold on lateral acceleration and braking, not a tyre-slip model; noise perturbs lane, heading and speed but not the ideal road previews; one simulator, one expert, original circuits, no real-car claim.",
               "- Browser and NumPy use different random streams (so noisy runs differ), but every deterministic quantity agrees: the browser engine replays all 2,560 saved NumPy rollouts of the retrained networks with identical outcomes and metrics within 1e-9 (`tests/student-engine.cjs`), and 24 fixture trajectories match to 1e-6 m (`tests/engine-fixtures.cjs`).",
-              "- Curvature inputs are read from the centreline sample that *starts* at a boundary (`driving.SAMPLE_SNAP`), so one ulp of rounding noise cannot flip them between engines or platforms. Against the preserved first lab this changes a continuous metric in 69 of its 2,304 saved rollouts (never an outcome); `git tag lab-v1` marks the code that produced those files exactly.", "",
+              "- Curvature inputs are read from the centreline sample that *starts* at a boundary (`driving.SAMPLE_SNAP`), so one ulp of rounding noise cannot flip them between engines or platforms. Against the preserved first lab this changes a continuous metric in 69 of its 2,304 saved rollouts (never an outcome); `git tag lab-v1` marks the code that produced those files exactly.",
+              "- Module 12's reinforcement learner is a small PPO actor-critic written for this lab (`student_rl.js`), not a library. Its learning rate (3e-4) and steering-smoothness weight (0.3) were chosen on a handful of circuits and seeds that the reference run also contains, "
+              "so the reference describes this setup and is not a blind test of reinforcement learning. Both learners are tested on the circuit they trained on; module 9 is where transfer to unseen circuits is measured.",
+              "- Module 12's saved example is replayed stage by stage in the NumPy simulator by `student_verify.py`. A car that steers smoothly reproduces to the 0.1 s; a car that flicks its steering is chaotic (a 1e-14 difference between two correct simulators grows to metres within 15 s), "
+              "so for those only the outcome is expected to agree. That is one more reason the smoothness term is in the default reward.", "",
               "## Reproduce", "", "```sh",
               ".venv/bin/python student_experiments.py --output student_v2_artifacts --base wall_artifacts",
               "node tools/coverage_reference.cjs --artifact student_v2_artifacts",
+              "node tools/journey_reference.cjs --artifact student_v2_artifacts    # about 8 minutes on 12 cores",
               ".venv/bin/python student_render.py --output student_v2_artifacts",
               "npm run test:student",
               "npm run test:engine && .venv/bin/python -m unittest discover -s tests",
@@ -325,15 +340,21 @@ Version 2 draws training and validation as **different expert episodes from the 
     return "\n".join(lines)
 
 
-def deck(data, kit, output, manifest):
-    slides = [("From watching a driver to testing an ML idea", ["Eleven hands-on lessons on top of the preserved driving simulator", "Real supervised updates and simulated motion, not animation-only improvement",
+def deck(data, kit, output, manifest, journey=None):
+    slides = [("From watching a driver to testing an ML idea", ["Twelve hands-on lessons on top of the preserved driving simulator", "Real supervised updates and simulated motion, not animation-only improvement",
                                                                  "The car remains fictional; no real-driving safety claims"], None)]
     for index, module in enumerate(kit["modules"], 1):
         slides.append((f"{index}. {module['title']}", [kit["objectives"][int(o[1:]) - 1]["text"] for o in module["objectives"][:2]] + [f"Discuss: {module['discussion'][0]}"], None))
     slides += [("Measured: input removal over ten seeds", ["Dots are seeds; bars are means with bootstrap intervals over seeds", "Only removing previews is clearly different; heading and margin sit inside the seed spread"], "visuals/feature_learning.png"),
                ("Measured: loss versus driving", ["Validation loss is smooth and monotonic", "Recovery success is erratic across seeds: low loss is not driving success"], "visuals/loss_vs_driving.png"),
-               ("Measured: distribution shift", ["Section-level success with bootstrap intervals over sections", "Grip is a hard threshold in this toy model"], "visuals/robustness.png"),
-               ("What to take away", ["Name the unit of replication before choosing an interval", "Cover the states you will actually visit; check with a matched control", "Freeze before you test; say what an interval does not cover"], None)]
+               ("Measured: distribution shift", ["Section-level success with bootstrap intervals over sections", "Grip is a hard threshold in this toy model"], "visuals/robustness.png")]
+    if journey:
+        overall, ablation = journey["data"]["overall"], journey["data"]["ablation"]
+        slides.append(("Measured: from an untrained car to a lap", [
+            f"Each picture is a whole lap by the car as it stood at that stage; imitation stays on the lap from a median {overall['imitation']['stableLapSteps']['median']:,.0f} labelled steps, "
+            f"reinforcement from {overall['reinforcement']['stableLapSteps']['median']:,.0f} simulated steps with no labels",
+            f"Without a steering-smoothness reward, {ablation['without']['flickering']} of {ablation['without']['seeds']} reinforcement cars flicked the steering every step; with it, {ablation['with']['flickering']}"], "visuals/journey_filmstrip.png"))
+    slides.append(("What to take away", ["Name the unit of replication before choosing an interval", "Cover the states you will actually visit; check with a matched control", "Freeze before you test; say what an interval does not cover"], None))
     presentation = Presentation()
     presentation.slide_width, presentation.slide_height = Inches(13.333), Inches(7.5)
     sections = []
@@ -353,7 +374,7 @@ def deck(data, kit, output, manifest):
         slide.notes_slide.notes_text_frame.text = "Use the corresponding interactive module. " + " ".join(bullets) + " Distinguish learned steering/target speed from automatic pedals/gears; do not claim real-car safety."
         sections.append(f"<section><h2>{index}. {esc(title)}</h2><ul>" + "".join(f"<li>{esc(b)}</li>" for b in bullets) + "</ul>" + (f'<img src="{image}">' if image else "") + "</section>")
     presentation.save(output / "training_deck.pptx")
-    (output / "training_deck.html").write_text(document("Classroom Deck: Eleven Ways to Understand ML Driving", "".join(sections)))
+    (output / "training_deck.html").write_text(document("Classroom Deck: Twelve Ways to Understand ML Driving", "".join(sections)))
     write_json(output / "deck_manifest.json", {"slides": len(slides), "worksheets": len(kit["worksheets"]), "speaker_notes": True})
 
 
@@ -363,6 +384,189 @@ def coverage_summary(output):
         return None
     reference = json.loads(path.read_text())
     return {"data": reference, "text": reference["markdown"]}
+
+
+def journey_summary(output):
+    path = output / "data/journey_reference.json"
+    if not path.exists():
+        return None
+    reference = json.loads(path.read_text())
+    return {"data": reference, "page": {key: value for key, value in reference.items() if key not in JOURNEY_PRIVATE}, "text": reference["markdown"]}
+
+
+def key_stages(stages, count=10):
+    """The pictures of the page's filmstrip: spaced more closely early on, always keeping the first lap and the last stage (mirrors keyStages in student_journey_ui.js)."""
+    last = len(stages) - 1
+    if last < count:
+        return list(range(len(stages)))
+    picks = {int(np.floor(last * (i / (count - 1)) ** 1.6 + .5)) for i in range(count)}
+    first = next((i for i, stage in enumerate(stages) if stage["row"][2]), -1)
+    if first > 0 and first not in picks:
+        picks.discard(min(sorted(i for i in picks if 0 < i < last), key=lambda i: abs(i - first)))
+        picks.add(first)
+    return sorted(picks)
+
+
+def stage_label(method, stage):
+    if stage["index"] == 0:
+        return "Untrained"
+    if method == "imitation":
+        return "Expert demos" if stage["round"] == 0 else f"DAgger round {stage['round']}"
+    return f"Iteration {stage['iteration']}"
+
+
+def journey_reading(reference):
+    """Plain-language reading of the saved journey run, generated from its numbers so the text cannot contradict them."""
+    overall, ablation, dt = reference["overall"], reference["ablation"], .1
+    imitation, reinforcement = overall["imitation"], overall["reinforcement"]
+    minutes = lambda steps: steps * dt / 60  # noqa: E731
+    lines = [f"- The first lap needs far less experience with an expert's labels than with a reward alone: imitation's median first lap came after {imitation['firstLapSteps']['median']:,.0f} labelled steps "
+             f"({minutes(imitation['firstLapSteps']['median']):.1f} min of driving), reinforcement's after {reinforcement['firstLapSteps']['median']:,.0f} simulated steps ({minutes(reinforcement['firstLapSteps']['median']):.0f} min).",
+             f"- A lap that *stays* a lap is a stricter test (the first stage from which every later stage also completes it): imitation {imitation['stableLapSteps']['median']:,.0f} steps, reinforcement "
+             f"{reinforcement['stableLapSteps']['median']:,.0f} steps, {reinforcement['stableLapSteps']['median'] / imitation['stableLapSteps']['median']:.0f}× as many.",
+             f"- The final cars: imitation completes the lap in {imitation['finalLaps']} of {imitation['runs']} runs at {imitation['ratio']:.2f}× the expert's lap time on average, reinforcement in {reinforcement['finalLaps']} of "
+             f"{reinforcement['runs']} runs at {reinforcement['ratio']:.2f}×. Neither learner improves smoothly: after first completing the lap, imitation failed it again at some later stage in "
+             f"{imitation['lostLap']} of {imitation['runs']} runs and reinforcement in {reinforcement['lostLap']} of {reinforcement['runs']} (in the final car: {imitation['regressed']} and {reinforcement['regressed']}).",
+             f"- Reward design matters: on circuit {ablation['trackId']} the final cars trained with the steering-smoothness term flick the steering in {ablation['with']['flickering']} of {ablation['with']['seeds']} runs "
+             f"({ablation['with']['flicker']:.2f}° per step on average); trained without it, {ablation['without']['flickering']} of {ablation['without']['seeds']} do ({ablation['without']['flicker']:.2f}° per step). "
+             f"Lap times were {ablation['with']['ratio']['mean']:.2f}× and {ablation['without']['ratio']['mean']:.2f}× the expert's: the penalty costs a little speed.",
+             "- Imitation also needed an expert that can label any state; reinforcement needed only a score and a simulator it can crash a hundred thousand times. "
+             "Both learn one circuit and are tested on that circuit: this compares what each costs, not which method is better in general."]
+    return lines
+
+
+def journey_replays(reference, track):
+    """The key stages of the saved example and the whole lap each one drives, replayed in the NumPy simulator."""
+    featured = reference["featured"]
+    picks = {method: key_stages(featured[method]["stages"]) for method in ("imitation", "reinforcement")}
+    return picks, {(method, index): lap(track, featured[method]["stages"][index]["model"]) for method in picks for index in picks[method]}
+
+
+def journey_animation(reference, output, catalog, track, picks, replays):
+    """The learning movie as a GIF: the car as it stood at each key stage drives its whole lap, imitation on the left and reinforcement on the right."""
+    featured, methods = reference["featured"], ("imitation", "reinforcement")
+    colors = {"imitation": "#ffc56b", "reinforcement": "#76a9ff"}
+    short = {"wall_contact": "hit the wall", "off_track": "left the road", "lateral_acceleration_limit": "exceeded the grip limit"}
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.9), layout="constrained")
+    outline = np.vstack([track.left, track.right[::-1]])
+    lines, dots, notes = {}, {}, {}
+    for ax, method in zip(axes, methods):
+        ax.fill(outline[:, 0], outline[:, 1], color="#405064")
+        ax.set_aspect("equal")
+        ax.axis("off")
+        lines[method], = ax.plot([], [], color=colors[method], lw=2)
+        dots[method], = ax.plot([], [], "o", color=colors[method], mec="white", ms=8)
+        notes[method] = ax.text(.5, .5, "", transform=ax.transAxes, ha="center", va="center", fontsize=13, weight="bold")
+    title = fig.suptitle("", fontsize=13)
+    pictures, seconds_per_frame = max(len(p) for p in picks.values()), 3.2  # 32x at ten frames a second
+    chosen = lambda method, picture: picks[method][min(picture, len(picks[method]) - 1)]  # noqa: E731
+    frames = []
+    for picture in range(pictures):
+        duration = max(replays[method, chosen(method, picture)][1][-1, 0] for method in methods)
+        frames += [(picture, i * seconds_per_frame) for i in range(max(10, int(np.ceil(duration / seconds_per_frame))))] + [(picture, duration + 1)] * 6
+
+    def draw(frame):
+        picture, now = frame
+        for ax, method in zip(axes, methods):
+            index = chosen(method, picture)
+            result, trace = replays[method, index]
+            at = int(np.clip(np.searchsorted(trace[:, 0], now, side="right") - 1, 0, len(trace) - 1))
+            lines[method].set_data(trace[:at + 1, 1], trace[:at + 1, 2])
+            dots[method].set_data([trace[at, 1]], [trace[at, 2]])
+            done = result["end_reason"] == "section_complete"
+            if now < trace[-1, 0]:
+                notes[method].set_text("")
+            else:
+                notes[method].set_text(f"LAP {result['duration_s']:.0f} s" if done else f"{min(99, int(np.floor(result['progress'] * 100)))}% of the lap\n{short.get(result['end_reason'], result['end_reason'])}")
+            notes[method].set_color("#4de2c2" if done else "#ff8990")
+            ax.set_title(f"{'Imitation (DAgger)' if method == 'imitation' else 'Reinforcement (PPO)'}\n{stage_label(method, featured[method]['stages'][index])} · {featured[method]['stages'][index]['steps']:,} steps",
+                         fontsize=11, color=colors[method])
+        title.set_text(f"{track_name(catalog, featured['trackId'])}: the car as it stood at stage {picture + 1} of {pictures}, driving a whole lap from the start line")
+        return []
+
+    draw(frames[0])
+    FuncAnimation(fig, draw, frames=frames, interval=100, blit=False).save(output / "visuals/journey_learning.gif", writer=PillowWriter(fps=10))
+    plt.close(fig)
+
+
+def journey_charts(reference, output, catalog):
+    plt.style.use("dark_background")
+    featured, tracks = reference["featured"], tracks_from_catalog(WALL_CONFIG, catalog)
+    track, circuit = tracks[featured["trackId"]], str(featured["trackId"])
+    colors, outline = {"imitation": "#ffc56b", "reinforcement": "#76a9ff"}, np.vstack([track.left, track.right[::-1]])
+    short = {"wall_contact": "wall", "off_track": "off road", "lateral_acceleration_limit": "grip limit"}
+    columns = 10
+    picks, replays = journey_replays(reference, track)
+    fig, axes = plt.subplots(2, columns, figsize=(20, 6.4), layout="constrained")
+    for row, method in enumerate(("imitation", "reinforcement")):
+        stages = featured[method]["stages"]
+        for column in range(columns):
+            ax = axes[row, column]
+            ax.set_aspect("equal")
+            ax.axis("off")
+            if column >= len(picks[method]):
+                continue
+            stage = stages[picks[method][column]]
+            result, trace = replays[method, picks[method][column]]
+            done = result["end_reason"] == "section_complete"
+            ax.fill(outline[:, 0], outline[:, 1], color="#405064")
+            ax.plot(trace[:, 1], trace[:, 2], color=colors[method], lw=1.6)
+            ax.plot(*trace[0, 1:3], "o", color="white", ms=3)
+            if done:
+                ax.plot(*trace[0, 1:3], "o", mfc="none", mec="#4de2c2", ms=11, mew=2)
+            else:
+                ax.plot(*trace[-1, 1:3], "x", color="#ff5b65", ms=9, mew=2.5)
+            ax.set_title(stage_label(method, stage), fontsize=10)
+            outcome = f"LAP {result['duration_s']:.0f} s" if done else f"{min(99, int(np.floor(result['progress'] * 100)))}% · {short.get(result['end_reason'], result['end_reason'])}"
+            ax.text(.5, -.02, f"{outcome}\n{stage['steps']:,} steps", transform=ax.transAxes, ha="center", va="top", fontsize=9, color="#4de2c2" if done else "#ff8990")
+        axes[row, 0].text(-.05, .5, {"imitation": "Imitation\n(DAgger)", "reinforcement": "Reinforcement\n(PPO)"}[method], transform=axes[row, 0].transAxes, ha="right", va="center", fontsize=12, color=colors[method])
+    fig.suptitle(f"{track_name(catalog, featured['trackId'])}: one lap attempt by the car as it stood at each stage of training (NumPy replay of the saved example, seed {featured['seed']})")
+    fig.savefig(output / "visuals/journey_filmstrip.png", dpi=140)
+    plt.close(fig)
+    journey_animation(reference, output, catalog, track, picks, replays)
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9.5), layout="constrained")
+    data = reference["circuits"][circuit]
+    for method in ("imitation", "reinforcement"):
+        curve = data[method]["curve"]
+        x = np.maximum([p["steps"] for p in curve], 30)
+        axes[0, 0].fill_between(x, [p["lo"] for p in curve], [p["hi"] for p in curve], color=colors[method], alpha=.2)
+        axes[0, 0].plot(x, [p["median"] for p in curve], color=colors[method], lw=2, label=f"{method}: median and range of {data[method]['seeds']} seeds")
+        stages = featured[method]["stages"]
+        axes[0, 0].plot(np.maximum([s["row"][0] for s in stages], 30), [s["row"][1] for s in stages], "o", color=colors[method], ms=4)
+        seconds = [(max(p["steps"], 30), p["seconds"]) for p in curve if p["seconds"] is not None and p["laps"] * 2 >= data[method]["seeds"]]
+        axes[0, 1].plot(*zip(*seconds), "o-", color=colors[method], lw=2, ms=4, label=method)
+    axes[0, 0].set(xscale="log", ylim=(-2, 102), xlabel="simulated driving steps so far (log scale, 10 steps = 1 s)", ylabel="% of the lap completed", title="Share of the lap completed before the car failed (dots: seed 1)")
+    axes[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=9)
+    axes[0, 1].axhline(data["expertSeconds"], ls="--", color="#4de2c2", label="expert")
+    axes[0, 1].set(xscale="log", xlabel="simulated driving steps so far (log scale)", ylabel="lap time (s): median of the seeds that complete it", title="Lap time, at stages where at least half the seeds complete the lap")
+    axes[0, 1].legend()
+    limit = reference["settings"]["lap"]["flickerLimit"]
+    groups = [("Imitation", [r["stages"][-1][4] for r in reference["runs"]["imitation"][circuit]], colors["imitation"]),
+              ("RL with smoothness term", [r["stages"][-1][4] for r in reference["runs"]["reinforcement"][circuit]], colors["reinforcement"]),
+              ("RL without it", [r["stages"][-1][4] for r in reference["runs"]["reinforcement_no_smoothness"][circuit]], "#ff8990")]
+    for i, (name, values, color) in enumerate(groups):
+        axes[1, 0].scatter(np.full(len(values), i) + np.linspace(-.15, .15, len(values)), values, color=color, s=40)
+    axes[1, 0].axhline(limit, ls="--", color="#acbbce")
+    axes[1, 0].set(xticks=range(3), xticklabels=[g[0] for g in groups], ylabel="degrees the steering moves per 0.1 s step", title=f"Final car's steering, one dot per seed (dashed: {limit}° = flicking)")
+    ids = sorted(reference["circuits"], key=int)
+    stable_steps = {method: [reference["circuits"][i][method]["stableLapSteps"] for i in ids] for method in colors}
+    for method, shift in (("imitation", -.18), ("reinforcement", .18)):
+        stable = stable_steps[method]
+        position = np.arange(len(ids)) + shift
+        axes[1, 1].errorbar([s["median"] for s in stable], position, xerr=[[s["median"] - s["q1"] for s in stable], [s["q3"] - s["median"] for s in stable]], fmt="o", color=colors[method], capsize=3, label=method)
+    typical = np.median([r["median"] / i["median"] for r, i in zip(stable_steps["reinforcement"], stable_steps["imitation"])])
+    axes[1, 1].set(xscale="log", yticks=range(len(ids)), yticklabels=[f"{i} {reference['circuits'][i]['name'].replace(' GP-X', '')}" for i in ids], xlabel="driving steps until the car stays lapping (median and quartiles over seeds)",
+                   title=f"Every circuit: reinforcement needs about {typical:.0f}× the driving")
+    axes[1, 1].invert_yaxis()
+    axes[1, 1].legend(loc="center")
+    fig.suptitle(f"From zero to a lap: imitation against reinforcement learning ({reference['settings']['seeds']} seeds per circuit)")
+    fig.savefig(output / "visuals/journey_curves.png", dpi=140)
+    plt.close(fig)
+
+
+def track_name(catalog, track_id):
+    return next(item["name"] for item in catalog if item["id"] == track_id)
 
 
 def render(output, visuals=True):
@@ -375,6 +579,9 @@ def render(output, visuals=True):
     coverage = coverage_summary(output)
     if coverage:
         data["coverageReference"] = coverage["data"]["summary"]
+    journey = journey_summary(output)
+    if journey:
+        data["journeyReference"] = journey["page"]
     write_json(output / "data/lab.json", data)
     for source, target in SCRIPTS:
         shutil.copyfile(source, output / target)
@@ -384,11 +591,13 @@ def render(output, visuals=True):
     catalog = new_catalog(WALL_CONFIG, json.loads(Path("wall_artifacts/data/circuits.json").read_text()))
     write_json(output / "data/circuits.json", catalog)
     (output / "teacher_guide.html").write_text(teacher_guide(data, kit, manifest))
-    Path("STUDENT_V2_RESULTS.md").write_text(results_markdown(data, manifest, coverage, output))
+    Path("STUDENT_V2_RESULTS.md").write_text(results_markdown(data, manifest, coverage, journey, output))
     if visuals:
         charts(data, output)
         animation(data, output, catalog)
-        deck(data, kit, output, manifest)
+        if journey:
+            journey_charts(journey["data"], output, catalog)
+        deck(data, kit, output, manifest, journey)
     print(f"Rendered {len(kit['modules'])} modules, teacher guide, class dashboard{', charts, checkpoint GIF and deck' if visuals else ''} in {output}.")
 
 

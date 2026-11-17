@@ -18,11 +18,12 @@ from pptx import Presentation
 
 from driving import NeuralDriver, tracks_from_catalog, write_json
 from multi_render import inventory
-from student_experiments import CONDITIONS, MONITOR_TRACKS, _jittered, masked, mse, near_duplicate, policy, rule
+from student_experiments import CONDITIONS, JOURNEY_PRIVATE, MONITOR_TRACKS, _jittered, lap, masked, mse, near_duplicate, policy, rule
 from wall_sim import WALL_CONFIG, corner_scenarios, wall_simulate
 
-SCRIPTS = (("student_engine.js", "engine.js"), ("student_tools.js", "tools.js"), ("student_app.js", "app.js"), ("student_labs.js", "labs.js"))
-BUILD_FILES = ("index.html", "app.js", "engine.js", "tools.js", "labs.js", "class_dashboard.html", "teacher_guide.html")  # keep in step with tests/student-browser.mjs
+SCRIPTS = (("student_engine.js", "engine.js"), ("student_tools.js", "tools.js"), ("student_rl.js", "rl.js"), ("student_journey.js", "journey.js"),
+           ("student_app.js", "app.js"), ("student_labs.js", "labs.js"), ("student_journey_ui.js", "journey_ui.js"))
+BUILD_FILES = ("index.html", "app.js", "engine.js", "tools.js", "rl.js", "journey.js", "labs.js", "journey_ui.js", "class_dashboard.html", "teacher_guide.html")  # keep in step with tests/student-browser.mjs
 RESULT_FIELDS = ("success", "section_complete", "centered_exit", "wall_contacts", "end_reason", "progress", "duration_s", "min_clearance_m",
                  "exit_mean_lateral_m", "mean_lateral_m", "peak_speed_kmh", "braking_s")
 END_REASONS = {"section_complete", "wall_contact", "lateral_acceleration_limit", "timeout", "numerical_divergence"}
@@ -197,6 +198,82 @@ def verify_replays(output, data, tracks):
     return replays
 
 
+# ---- module 12: from zero to a lap ----------------------------------------------------------------------------------------------
+def lap_percent(result):
+    return 100 if result["end_reason"] == "section_complete" else min(99, int(np.floor(result["progress"] * 100)))
+
+
+def first_lap(rows):
+    return next((row[0] for row in rows if row[2]), None)
+
+
+def stable_lap(rows):
+    start = len(rows)
+    while start > 0 and rows[start - 1][2]:
+        start -= 1
+    return rows[start][0] if start < len(rows) else None
+
+
+def verify_journey(output, data, tracks):
+    """Module 12's saved reference: the page embeds it unchanged, every saved stage of the featured example is replayed in the independent NumPy simulator,
+    the experts' laps are re-driven, and the summary table is re-derived from the raw runs."""
+    path = output / "data/journey_reference.json"
+    require(path.exists(), "run `node tools/journey_reference.cjs --artifact <output>`, then student_render.py: module 12 needs its saved reference")
+    reference = read(path)
+    require(data.get("journeyReference") == {key: value for key, value in reference.items() if key not in JOURNEY_PRIVATE}, "the page embeds a stale journey reference; re-run student_render.py")
+    settings, featured, limit, minimum = reference["settings"], reference["featured"], reference["settings"]["lap"]["flickerLimit"], reference["settings"]["lap"]["flickerMinSeconds"]
+    track, replayed, smooth_exact = tracks[featured["trackId"]], 0, 0
+    for method in ("imitation", "reinforcement"):
+        stages = featured[method]["stages"]
+        require(len(stages) >= 10 and stages[0]["steps"] == 0, f"the {method} example must start from an untrained car and have many stages")
+        for stage in stages:
+            result, trace = lap(track, stage["model"])
+            steps, percent, completed, seconds, flicker = stage["row"]
+            label = f"{method} stage {stage['index']}"
+            # A car that flicks its steering for a long drive is chaotic (a 1e-14 difference between two correct simulators grows to metres in seconds), so only its outcome is compared.
+            exact = flicker <= limit or seconds < minimum
+            require((result["end_reason"] == "section_complete") == bool(completed), f"{label}: NumPy completes the lap differently ({result['end_reason']})")
+            require(abs(lap_percent(result) - percent) <= (1 if exact else 100), f"{label}: NumPy drives {lap_percent(result)}% of the lap, the page saved {percent}%")
+            python_flicker = float(np.abs(np.diff(trace[:, 5])).mean() * 180 / np.pi)
+            require((python_flicker > limit) == (flicker > limit), f"{label}: NumPy and the page disagree on whether the steering flicks ({python_flicker:.2f} against {flicker})")
+            if exact:
+                require(abs(result["duration_s"] - seconds) < .11 and abs(python_flicker - flicker) < .02, f"{label}: lap {result['duration_s']:.2f} s / {python_flicker:.3f}° against {seconds} s / {flicker}°")
+                smooth_exact += 1
+            replayed += 1
+    expert_laps = 0
+    for circuit_id, circuit in reference["circuits"].items():
+        result, _ = lap(tracks[int(circuit_id)])
+        require(result["end_reason"] == "section_complete" and abs(result["duration_s"] - circuit["expertSeconds"]) < .11, f"expert lap on circuit {circuit_id}")
+        expert_laps += 1
+        for method in ("imitation", "reinforcement"):
+            runs = [run["stages"] for run in reference["runs"][method][circuit_id]]
+            summary = circuit[method]
+            require(len(runs) == settings["seeds"] == summary["seeds"], f"{method} circuit {circuit_id}: seed count")
+            require(float(np.median([first_lap(rows) for rows in runs if first_lap(rows) is not None])) == summary["firstLapSteps"]["median"], f"{method} circuit {circuit_id}: first-lap median")
+            require(float(np.median([stable_lap(rows) for rows in runs if stable_lap(rows) is not None])) == summary["stableLapSteps"]["median"], f"{method} circuit {circuit_id}: stays-lapping median")
+            require(sum(rows[-1][2] for rows in runs) == summary["finalLaps"], f"{method} circuit {circuit_id}: final laps")
+            ratios = [rows[-1][3] / circuit["expertSeconds"] for rows in runs if rows[-1][2]]
+            require(abs(float(np.mean(ratios)) - summary["ratio"]["mean"]) < 1e-9, f"{method} circuit {circuit_id}: lap-time ratio")
+            require(sum(rows[-1][3] >= minimum and rows[-1][4] > limit for rows in runs) == summary["flickering"], f"{method} circuit {circuit_id}: flicking cars")
+            lost = sum(first_lap(rows) is not None and any(not row[2] for row in rows[[row[0] for row in rows].index(first_lap(rows)):]) for rows in runs)
+            require(lost == summary["lostLap"], f"{method} circuit {circuit_id}: seeds that lost a lap")
+            require(all(len(rows) == len(summary["curve"]) for rows in runs), f"{method} circuit {circuit_id}: every seed shares one stage schedule")
+    overall, ablation = reference["overall"], reference["ablation"]
+    imitation, reinforcement = overall["imitation"], overall["reinforcement"]
+    signals = {
+        "journey_untrained_cars_fail_at_once": all(not featured[m]["stages"][0]["row"][2] and featured[m]["stages"][0]["row"][1] <= 5 for m in ("imitation", "reinforcement")),
+        "journey_every_learner_can_end_with_a_lapping_car": all(featured[m]["stages"][-1]["row"][2] for m in ("imitation", "reinforcement")),
+        "journey_both_learners_lap_in_nearly_every_run": imitation["finalLaps"] >= .95 * imitation["runs"] and reinforcement["finalLaps"] >= .95 * reinforcement["runs"],
+        "journey_reward_alone_needs_far_more_driving_than_labels": reinforcement["stableLapSteps"]["median"] >= 10 * imitation["stableLapSteps"]["median"],
+        "journey_final_cars_are_near_expert_speed": 0.9 < imitation["ratio"] < 1.3 and 0.9 < reinforcement["ratio"] < 1.4,
+        "journey_without_a_smoothness_reward_the_steering_flicks": ablation["without"]["flickering"] >= .8 * ablation["without"]["seeds"] and ablation["with"]["flickering"] <= .1 * ablation["with"]["seeds"],
+        "journey_imitation_cars_never_flick": imitation["flickering"] == 0,
+    }
+    failed = [name for name, ok in signals.items() if not ok]
+    require(not failed, f"journey teaching signals missing from the saved results: {failed}")
+    return {"stages_replayed_in_numpy": replayed, "stages_matching_to_0.1s": smooth_exact, "expert_laps": expert_laps, "runs": imitation["runs"] + reinforcement["runs"] + ablation["without"]["seeds"], "signals": signals}
+
+
 # ---- teaching kit, documents, visuals, browser --------------------------------------------------------------------------------
 def verify_documents(output, data, kit):
     require(data["teaching"] == kit, "the page embeds a stale teaching kit; re-run student_render.py")
@@ -229,9 +306,11 @@ def verify_visuals(output):
         with Image.open(path) as image:
             require(image.width >= 1000 and len(image.getcolors(image.width * image.height) or []) > 20, f"{path.name} looks empty")
     names = {p.name for p in (output / "visuals").glob("*.png")}
-    require({"feature_learning.png", "loss_vs_driving.png", "robustness.png"} <= names, "missing charts")
+    require({"feature_learning.png", "loss_vs_driving.png", "robustness.png", "journey_filmstrip.png", "journey_curves.png"} <= names, "missing charts")
     with Image.open(output / "visuals/training_evolution.gif") as image:
         require(image.n_frames >= 25 and image.width >= 1000, "training evolution animation")
+    with Image.open(output / "visuals/journey_learning.gif") as image:
+        require(image.n_frames >= 100 and image.width >= 900, "journey learning movie")
 
 
 def verify_browser(output, kit):
@@ -288,7 +367,7 @@ def build_bundle(output):
     archive = Path("f1-driving-student-lab-v2.zip")
     files = list(output.rglob("*")) + list(Path("wall_artifacts").rglob("*")) + list(Path("tests").rglob("*")) + list(Path("tools").rglob("*"))
     files += list(Path(".").glob("*.py")) + list(Path(".github").rglob("*"))
-    files += [Path(name) for name in ("student_engine.js", "student_tools.js", "student_app.js", "student_labs.js", "student_lab.html", "student_dashboard.html",
+    files += [Path(name) for name in ("student_engine.js", "student_tools.js", "student_rl.js", "student_journey.js", "student_app.js", "student_labs.js", "student_journey_ui.js", "student_lab.html", "student_dashboard.html",
                                       "teaching_kit.json", "requirements.txt", "package.json", "package-lock.json", "README.md", "STUDENT_V2_RESULTS.md", "WALL_RESULTS.md")]
     files = sorted({path for path in files if path.is_file() and "__pycache__" not in path.parts})
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zipped:
@@ -319,6 +398,7 @@ def verify(output, bundle=False):
     consistency = verify_consistency(data, manifest)
     tracks = tracks_from_catalog(WALL_CONFIG, read(output / "data/circuits.json"))
     replays = verify_replays(output, data, tracks)
+    journey = verify_journey(output, data, tracks)
     slides = verify_documents(output, data, kit)
     verify_visuals(output)
     browser = verify_browser(output, kit)
@@ -328,7 +408,7 @@ def verify(output, bundle=False):
         "validation_checkpoint_selections_verified": len(data["histories"]), "checkpoint_losses_recomputed": sum(len(h) for h in data["histories"].values()),
         "reference_rollouts": len(data["ablations"]) + len(data["comparisons"]) + len(data["robustness"]) + manifest["monitor_rollouts"],
         "exact_repeated_reference_rollouts": replays, "monitor_vs_full_run_agreements": consistency,
-        "near_centreline_share": near_centre, "teaching_signals": signals, "browser_modules": browser["modules"], "browser_checks": sorted(browser["checks"]),
+        "near_centreline_share": near_centre, "teaching_signals": {**signals, **journey["signals"]}, "journey": {k: v for k, v in journey.items() if k != "signals"}, "browser_modules": browser["modules"], "browser_checks": sorted(browser["checks"]),
         "training_deck_slides": slides, "worksheets": len(kit["worksheets"]), "quiz_items": len(kit["quiz"]), "sealed_test_ids": [13, 14, 15],
     }
     write_json(output / "verification.json", report)
@@ -337,7 +417,7 @@ def verify(output, bundle=False):
         archive = build_bundle(output)
         print(f"Verified portable ZIP: {archive}, {archive.stat().st_size / 1024**2:.1f} MiB.")
     print(f"Verified {len(kit['modules'])} modules, {report['frozen_models_verified']} frozen models, {len(data['histories'])} validation selections, "
-          f"{replays} exact replays, {len(signals)} teaching signals and the browser run in {output}.")
+          f"{replays} exact replays, {journey['stages_replayed_in_numpy']} journey stages replayed in NumPy, {len(signals) + len(journey['signals'])} teaching signals and the browser run in {output}.")
 
 
 if __name__ == "__main__":

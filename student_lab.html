@@ -21,13 +21,15 @@ a{color:#4de2c2}[hidden]{display:none!important}details{margin-top:12px}summary{
 .pill{display:inline-block;padding:2px 9px;border:1px solid #536780;border-radius:99px;font-size:12px;color:#acbbce;margin-right:6px}
 .pill.exploratory{border-color:#ffc56b;color:#ffc56b}.pill.legacy{border-color:#ff8990;color:#ff8990}
 .legend span{margin-right:14px;font-size:12px}.legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:6px}
+#journeyViewHost{margin:12px 0}#journeyViewHost canvas{display:block;max-width:960px;margin:0 auto}
 @media(max-width:850px){.layout{grid-template-columns:1fr}nav{position:static;display:flex;flex-wrap:wrap}nav button{width:auto}.grid,.grid3{grid-template-columns:1fr}}
 @media print{nav,.controls,button,#view,#replayControls,canvas{display:none}.layout{display:block}.panel{break-inside:avoid}body{background:white;color:black}p,label{color:black}}
-</style></head><body><header><div class="badge">ELEVEN HANDS-ON LESSONS / REAL SIMULATION AND REAL LEARNING</div>
+</style></head><body><header><div class="badge">TWELVE HANDS-ON LESSONS / REAL SIMULATION AND REAL LEARNING</div>
 <h1>Student Machine Learning Driving Lab</h1><p>Predict, collect examples, update weights, test your hypotheses and find out why imitation learning is hard.
 Runs locally without a server; nothing is uploaded. The neural network learns steering and target speed; ordinary controllers produce pedals and gears.</p>
+<p><button id="gotoJourney" class="secondary">Module 12: watch imitation and reinforcement learning go from an untrained car to a full lap</button></p>
 <p><a href="teacher_guide.html">Teacher guide, rubric and printable worksheets</a> · <a href="class_dashboard.html">Class dashboard (teacher)</a> · <a href="training_deck.html">Classroom presentation</a></p></header>
-<main class="layout"><nav aria-label="Eleven learning modules">
+<main class="layout"><nav aria-label="Twelve learning modules">
 <button id="tabPredict" data-module="predict" class="active">1. Predict before moving</button>
 <button id="tabDataset" data-module="dataset">2. Build a dataset and train</button>
 <button id="tabStep" data-module="step">3. One training step</button>
@@ -39,18 +41,21 @@ Runs locally without a server; nothing is uploaded. The neural network learns st
 <button id="tabGeneralization" data-module="generalization">9. Generalization and leakage</button>
 <button id="tabRobustness" data-module="robustness">10. Robustness challenges</button>
 <button id="tabWorksheets" data-module="worksheets">11. Guided experiments</button>
+<button id="tabJourney" data-module="journey">12. From zero to a lap</button>
 </nav><div>
 <div class="controls">
 <div><label for="track">Track</label><select id="track"></select></div>
 <div><label for="scenario">Starting challenge</label><select id="scenario"></select></div>
 <div><label for="model">Policy</label><select id="model"><option value="pretrained">Pretrained wall-aware driver</option><option value="student">Your student model</option>
-<option value="ridge" disabled>Linear baseline (train in module 6)</option><option value="knn" disabled>Nearest-neighbour baseline (train in module 6)</option></select></div>
+<option value="ridge" disabled>Linear baseline (train in module 6)</option><option value="knn" disabled>Nearest-neighbour baseline (train in module 6)</option>
+<option value="journeyImitation" disabled>Final imitation car (train in module 12)</option><option value="journeyReinforcement" disabled>Final reinforcement car (train in module 12)</option></select></div>
 <div><label for="camera">Camera</label><select id="camera"><option value="follow">Close-up following</option><option value="overview">Whole circuit</option></select></div>
 </div>
 <p id="testExposure" class="warning">Three new test circuits are sealed by classroom protocol (not secrecy). Legacy holdouts are not pristine.</p>
 <p id="legacyNote" class="note"></p>
 <canvas id="view" width="1100" height="620" aria-label="Fictional car with moving steering wheels, footprint and track walls"></canvas>
-<div id="replayControls"><button id="replayPlay">Play replay</button><label for="replayTime">Recorded live-simulation timeline</label>
+<div id="replayControls"><button id="replayPlay">Play replay</button><label for="replaySpeed">Replay speed</label><select id="replaySpeed"><option value="1">1×</option><option value="2">2×</option><option value="4" selected>4×</option><option value="8">8×</option><option value="16">16×</option><option value="32">32×</option></select>
+<label for="replayTime">Recorded live-simulation timeline</label>
 <input id="replayTime" type="range" min="0" max="1000" value="0"><p id="telemetry" class="numbers"></p></div>
 <p id="status" role="status">Ready. Pick a lesson.</p><button id="cancelRun" class="danger" hidden>Cancel the running experiment</button><div id="error" role="alert"></div>
 
@@ -296,7 +301,57 @@ Random streams are reproducible within each runtime, but browser RNG is not NumP
 Nothing is sent anywhere: you download it and hand it in.</p>
 <label for="nickname">Optional nickname (up to 20 characters)</label><input id="nickname" maxlength="20" autocomplete="off"><button id="downloadCard">Download my results card</button>
 </section>
-<p class="note">Educational imitation learning, not reinforcement learning or real-car safety validation.
+
+<section id="journey" class="panel" hidden>
+<h2>12. From zero to a lap: imitation versus reinforcement learning</h2>
+<p>The earlier lessons replay 150 m corner sections. Here two learners start as a car that cannot drive and train on <strong>one whole circuit</strong>. After every stage of training, the car <em>as it is at that moment</em>
+is put on the start line and drives a complete lap with no help. Follow the filmstrip from a car that crashes in its first seconds to one that laps.</p>
+<ul>
+<li><strong>Imitation (DAgger, module 7).</strong> An expert supplies the right steering and speed for the states the car visits. The network is trained to copy those labels. What it costs: expert labels.</li>
+<li><strong>Reinforcement (PPO).</strong> There are no labels at all. The car drives, earns a score (+ for distance along the circuit, − for crashing, − for jerky commands, a small nudge to stay central) and each update makes the rewarded driving more likely.
+What it costs: an enormous amount of driving.</li>
+</ul>
+<p class="note">Both learners train the same 18-24-16-2 network on the same 18 inputs, so a finished reinforcement car is an ordinary model you can drive in any lesson. Reinforcement explores with random noise while it trains;
+every lap you see here is driven by the learner's best guess with the noise switched off. One simulated step is 0.1 s of driving.</p>
+<div class="grid3"><div><label for="journeyCircuit">Circuit (it trains and laps this one circuit)</label><select id="journeyCircuit"></select>
+<label for="journeySeed">Seed (network start and randomness)</label><input id="journeySeed" type="number" min="1" max="999" step="1" value="1"></div>
+<div><label for="journeyRounds">Imitation: DAgger rounds after the expert demonstrations</label><select id="journeyRounds"><option value="8">8 (quick)</option><option value="16" selected>16</option></select>
+<label for="journeyIterations">Reinforcement: PPO iterations (2,048 simulated steps each)</label><select id="journeyIterations"><option value="100">100 (about 20 s)</option><option value="300" selected>300 (about 1 minute)</option><option value="600">600 (about 2 minutes)</option></select>
+<label for="journeyReward">Reinforcement: reward</label><select id="journeyReward"><option value="0.3" selected>Distance, centring, crash and steering smoothness (default)</option><option value="0">The same without the steering-smoothness term</option></select></div>
+<div><button id="journeyBoth">Train both learners</button><button id="journeyImitation" class="secondary">Train imitation only</button><button id="journeyReinforcement" class="secondary">Train reinforcement only</button>
+<button id="journeySaved" class="secondary">Load the saved example (seed 1)</button></div></div>
+<p id="journeyStatus" role="status"></p>
+<canvas id="journeyGallery" width="1100" height="410" aria-label="Filmstrip of full-lap attempts by the imitation learner and the reinforcement learner at successive stages of training"></canvas>
+<p class="note">Each picture is one lap attempt by the car as it stood at that stage. A green ring marks a completed lap; a red cross is where the car failed (wall contact, leaving the road or exceeding the grip limit).
+Click a picture to put that stage in the replay. Stages are spaced more closely early on, when the cars change fastest.</p>
+<div id="journeyViewHost"></div>
+<div class="grid"><div><label for="journeyImitationStage" id="journeyImitationLabel">Imitation stage</label><input id="journeyImitationStage" type="range" min="0" max="0" value="0" disabled><p id="journeyImitationDetail" class="numbers"></p></div>
+<div><label for="journeyReinforcementStage" id="journeyReinforcementLabel">Reinforcement stage</label><input id="journeyReinforcementStage" type="range" min="0" max="0" value="0" disabled><p id="journeyReinforcementDetail" class="numbers"></p></div></div>
+<div class="controls"><button id="journeyReplay" disabled>Replay the two chosen cars and the expert</button><button id="journeyMovie" class="secondary" disabled>Play the learning movie (the pictures above, in order)</button></div>
+<p class="note">The replay (above, under the filmstrip) shows the imitation car (amber), the reinforcement car (blue) and the expert (green) driving the same lap from the start line. It opens on the whole circuit at 16×; change the replay speed or camera under the view whenever you like.</p>
+<p id="journeyCaption" class="numbers"></p>
+<p class="legend note"><span><i style="background:#ffc56b"></i>Imitation</span><span><i style="background:#76a9ff"></i>Reinforcement</span><span><i style="background:#4de2c2"></i>Expert (dashed lap time)</span></p>
+<div class="grid"><canvas id="journeyProgress" width="540" height="320" aria-label="Share of the lap completed against driving experience"></canvas>
+<canvas id="journeyLapTime" width="540" height="320" aria-label="Lap time of completed laps against driving experience"></canvas></div>
+<p id="journeyBandNote" class="note"></p>
+<p id="journeyCompare" class="numbers"></p>
+<details open><summary>Stage-by-stage table</summary><div class="table"><table id="journeyTable"></table></div></details>
+<details><summary>Inside the reinforcement learner: why training crashes are not the finished car's crashes</summary>
+<canvas id="journeyTraining" width="1100" height="300" aria-label="Crash rate of training drives and exploration noise against reinforcement iteration"></canvas>
+<p class="note">While it trains, the reinforcement learner adds random noise to its steering and speed so that it tries new things. That noise causes crashes the finished car would not make, so the red line stays well above zero even after the
+car laps reliably. The lap results above switch the noise off. The grey line is the noise size: reinforcement learning slowly turns its own exploration down as it becomes more certain.</p></details>
+<details id="journeyReferenceBox" hidden><summary>Reference run: every valid circuit, ten seeds, both learners</summary>
+<p id="journeyReferenceNote" class="note"></p><div class="table"><table id="journeyReferenceTable"></table></div>
+<p id="journeyAblation" class="note"></p></details>
+<details><summary>What this comparison does and does not show</summary>
+<ul><li>Both learners drive the circuit they trained on. Memorising that circuit is allowed here; whether a policy transfers to circuits it has never driven is module 9's question.</li>
+<li>Imitation needs an expert that can label any state. Reinforcement needs a score and a simulator it can crash a million times. Which of those you have decides which method is available.</li>
+<li>The reinforcement learner is fully specified by its reward, and the reward is a design decision, not a fact about the track. With only distance, crashing and centring in the reward, every final car we trained flicked its steering back and forth on every step:
+flicking costs no lap time, so nothing pushed it out. A small penalty on changing the commands removes it. Choose the reward without that term in the menu above to watch it happen, and compare the "steering movement" column in the table.</li>
+<li>Learning is not smooth for either learner: a car that completes the lap at one stage can fail at a later one (the reference table counts the seeds that did), so trust the stage from which every later stage also laps, not the first success.</li>
+<li>These numbers are for this simulator, these settings and these seeds. They are not a ranking of the two families of methods.</li></ul></details>
+</section>
+<p class="note">Educational imitation and reinforcement learning in a simplified simulator, not real-car safety validation.
 No telemetry or student data is uploaded. The earlier eight-module lab remains available separately.</p>
 </div></main><script id="experiment-data" type="application/json">__DATA__</script>
-<script src="engine.js"></script><script src="tools.js"></script><script src="app.js"></script><script src="labs.js"></script></body></html>
+<script src="engine.js"></script><script src="tools.js"></script><script src="rl.js"></script><script src="journey.js"></script><script src="app.js"></script><script src="labs.js"></script><script src="journey_ui.js"></script></body></html>

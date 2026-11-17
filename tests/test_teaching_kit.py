@@ -13,8 +13,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 KIT = json.loads((ROOT / "teaching_kit.json").read_text())
 HTML = (ROOT / "student_lab.html").read_text()
-SCRIPTS = {name: (ROOT / name).read_text() for name in ("student_app.js", "student_labs.js")}
-DYNAMIC_IDS = {"wsFactor", "wsValues", "wsSeeds", "wsPool", "wsParams"}  # worksheet controls built at run time
+SCRIPTS = {name: (ROOT / name).read_text() for name in ("student_app.js", "student_labs.js", "student_journey_ui.js")}
+DYNAMIC_IDS = {"wsFactor", "wsValues", "wsSeeds", "wsPool", "wsParams", "wsCircuit", "wsReward"}  # worksheet controls built at run time
 
 
 class TeachingKitTests(unittest.TestCase):

@@ -98,6 +98,30 @@ def rule(features):
     return np.array([steer / .5, 2 * 14 / 36 - 1])
 
 
+# Module 12 drives whole laps, not 150 m sections: from the start line at 12 m/s, for up to 400 s (4000 steps).
+LAP_START = {"name": "start line", "fraction": 0.0, "lateral": 0.0, "heading_error": 0.0, "speed": 12.0}
+LAP_CONFIG = replace(WALL_CONFIG, max_steps=4000)
+
+
+def browser_driver(model):
+    """The NumPy driver for a network serialised by the browser engine (weights are stored input by output, as here)."""
+    driver = NeuralDriver(1, 18, (24, 16))
+    driver.weights = [np.array(w, dtype=float) for w in model["weights"]]
+    driver.biases = [np.array(b, dtype=float) for b in model["biases"]]
+    return driver
+
+
+def lap(track, model=None):
+    """One whole lap from the start line, the NumPy counterpart of StudentJourney.lapRun; model=None is the expert."""
+    driver = None if model is None else policy(browser_driver(model), LAP_CONFIG)
+    result, trace = wall_simulate(track, LAP_CONFIG, driver, LAP_START, goal=float(track.length))
+    return result, trace
+
+
+# The page embeds the saved reference without the raw per-run rows (those stay in data/journey_reference.json) and without the rendered table.
+JOURNEY_PRIVATE = ("runs", "markdown")
+
+
 def export_track(item, track):
     return {**{key: item[key] for key in ("id", "name", "split")},
             **{key: getattr(track, key).tolist() for key in

@@ -1,6 +1,6 @@
 # F1 Driving Lab
 
-**Student ML Driving Lab, version 2:** [eleven hands-on modules](student_v2_artifacts/index.html),
+**Student ML Driving Lab, version 2:** [twelve hands-on modules](student_v2_artifacts/index.html),
 [measured results](STUDENT_V2_RESULTS.md), [teacher guide, rubric and printable worksheets](student_v2_artifacts/teacher_guide.html),
 a [class dashboard](student_v2_artifacts/class_dashboard.html) and a [classroom deck](student_v2_artifacts/training_deck.html).
 See [Student lab v2](#student-lab-v2) below for what changed, why, and how to run and test it.
@@ -44,8 +44,27 @@ keeps every preserved artifact and rebuilds the lab on evidence. Each row is som
 | One architecture and one setting | Module 6: width, depth, batch size, schedules, weight decay, gradient clipping, early stopping, label noise, and ridge / nearest-neighbour baselines |
 | No account of *why* a drive failed | Module 8: expert labels at the true states, first disagreement, expert-recovery forks (a counterfactual about a state, not proof of cause) and dependency-aware permutation importance |
 | Silent failures: NaN reported as "timeout", self-intersecting circuits accepted, unchecked hyper-parameters | `numerical_divergence` is a distinct outcome; circuits are validated strictly (`Apex Park` and `Square Sprint` keep their legacy inner-wall folds, flagged and excluded from headline pools); learning rate, decay and clipping are range-checked |
-| Five quiz items, no teacher support | Eleven modules, 14 objectives, 16 quiz items whose wrong answers map to 19 catalogued misconceptions, a rubric, printable worksheets, a results card and a class dashboard; the answer key lives in `teaching_kit.json` |
+| Five quiz items, no teacher support | Twelve modules, 16 objectives, 20 quiz items whose wrong answers map to 22 catalogued misconceptions, a rubric, printable worksheets, a results card and a class dashboard; the answer key lives in `teaching_kit.json` |
+| Every replay was a 150 m corner section and the lab said "no reward signal": nothing showed a car *learning to drive a whole lap*, and there was no reinforcement learning | Module 12 trains an imitation learner (DAgger) and a PPO reinforcement learner on one circuit and, after every stage of training, drives a whole lap from the start line: a filmstrip, a learning movie, learning curves and a stage table take both from an untrained car that crashes in its first seconds to a car that laps. See [From zero to a lap](#from-zero-to-a-lap-module-12) |
 | No version control or CI | Git history, the `lab-v1` tag, GitHub Actions (`.github/workflows/ci.yml`) |
+
+### From zero to a lap (module 12)
+
+Both learners use the same 18-24-16-2 network, the same 18 inputs and the same car; they differ in what they are given. Imitation (DAgger, as in module 7) is given an expert's
+steering and speed for the states it visits. Reinforcement is given only a reward (distance along the circuit, minus crashing, minus jerky commands, a small nudge to stay central)
+and learns by proximal policy optimisation (`student_rl.js`, a small PPO actor-critic written for the lab, checked against an independent NumPy implementation). After every stage the car as
+it stands drives one whole lap from the start line (policy mean, no exploration noise). Ten seeds on each of the nine valid circuits (`tools/journey_reference.cjs`, about 8 minutes on 12 cores):
+
+| | Imitation | Reinforcement |
+|---|---|---|
+| Driving before the car *stays* on the lap (median, from the first stage after which every later stage laps) | 750 labelled steps (75 s of driving) | 40,960 simulated steps (about 68 min), roughly 55 times as many, with no expert labels |
+| Final car completes the lap | 89 of 90 runs | 90 of 90 runs |
+| Final lap time relative to the expert's | 1.05 times (mean) | 1.18 times (mean) |
+
+Reward design is part of the lesson: with only distance, crashing and centring in the reward, all ten final cars on the featured circuit flicked their steering every step (4.5° per 0.1 s, the actuator's speed limit);
+a small penalty on changing the commands removes it (0.05° per step) at a cost of about 10% in lap time. The module lets students switch that term off and watch.
+Both learners are tested on the circuit they trained on, so this compares what each costs here, not which method is better; the hyper-parameters were chosen on a few circuits that the reference also contains.
+`student_verify.py` replays all 42 stages of the saved example in the NumPy simulator: every outcome, steering measure and lap time agrees (to 0.1 s).
 
 ### Run it
 
@@ -56,11 +75,12 @@ wall-lab commands or unpack a bundle). Everything below is local and needs no se
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 python student_experiments.py --output student_v2_artifacts --base wall_artifacts   # ~75 s on 14 cores
 node tools/coverage_reference.cjs --artifact student_v2_artifacts                   # ten-seed DAgger reference, ~30 s
+node tools/journey_reference.cjs --artifact student_v2_artifacts                    # module 12: 9 circuits x 10 seeds x 2 learners, ~8 min on 12 cores
 python student_render.py --output student_v2_artifacts                              # page, teacher guide, dashboard, charts, deck
 open student_v2_artifacts/index.html
 ```
 
-For a classroom: hand students `index.html` (a single self-contained file plus four scripts), keep `teacher_guide.html`, and
+For a classroom: hand students `index.html` (a single self-contained file plus seven scripts), keep `teacher_guide.html`, and
 collect the results cards on `class_dashboard.html`. For a test no student could have inspected, generate a pack from a private
 seed with `python tools/make_fresh_pack.py --seed <secret> --circuits 3 --output fresh_pack.json` and load it in module 9
 after students freeze their models. The three built-in test circuits are sealed by classroom protocol only: their labels ship in the page.
@@ -79,7 +99,7 @@ python -m unittest discover -s tests          # simulator, guards, circuit valid
 npm run test:engine                           # browser engine and statistics vs. the committed NumPy/SciPy fixture (CI)
 npm run test:student                          # needs student_v2_artifacts: replays all 2,560 saved NumPy rollouts in JavaScript
 npm ci && PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npx playwright install chromium
-PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npm run test:browser:student   # eleven modules, teacher tools and failure paths in Chromium
+PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" npm run test:browser:student   # twelve modules, teacher tools and failure paths in Chromium
 python student_verify.py --output student_v2_artifacts [--bundle]        # hashes, exact replays, teaching signals, visuals, browser report
 ```
 
@@ -98,6 +118,8 @@ first lab this changes a continuous metric (never an outcome) in 69 of its 2,304
 
 The expert is a heuristic (about 2% of typical starts, the fast off-centre ones, trip its own lateral-acceleration limit); a learner cannot exceed its labels.
 Grip is a threshold on lateral acceleration and braking, not a tyre model. There is one simulator, one expert and original circuits; nothing here supports a real-car claim.
+Module 12's two learners are tested on the circuit they trained on (transfer is module 9's question), its reinforcement learner was tuned on circuits the reference run also contains, and the saved
+ten-seed numbers describe that setup rather than reinforcement learning in general.
 
 ## Open the results
 
@@ -148,7 +170,7 @@ completion, then progress, then lateral accuracy.
 
 ## How it learns
 
-This is **DAgger-style imitation learning**, not reinforcement learning.
+This is **DAgger-style imitation learning**, not reinforcement learning (this is the original single-track experiment; module 12 of the version-2 student lab adds a reinforcement learner and compares the two).
 A pure-pursuit teacher supplies steering and curvature-aware target-speed
 labels. The learner sees lane/heading error, speed, previous steering, and
 four forward track previews. A `13 → 48 → 32 → 2` tanh network predicts steering

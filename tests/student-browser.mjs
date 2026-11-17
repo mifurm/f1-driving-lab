@@ -1,4 +1,4 @@
-// Real-browser verification of the student lab (version 2): all eleven modules, the teacher tools and the failure paths.
+// Real-browser verification of the student lab (version 2): all twelve modules, the teacher tools and the failure paths.
 //   PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" node tests/student-browser.mjs [student_v2_artifacts]
 // Every check runs the real engine in Chromium; nothing is mocked. Writes browser_verification.json, teacher_guide.pdf and screenshots.
 import assert from "node:assert/strict";
@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -30,9 +31,14 @@ const intended = [/Make both predictions/, /nearly identical/, /does not match t
   /Cancelled: nothing was added to the DAgger session/];
 const unexpected = text => !intended.some(pattern => pattern.test(text));
 // The report is only evidence for the exact build it exercised, so it carries the hashes of the page files; student_verify.py compares them with the files on disk.
-const BUILD_FILES = ["index.html", "app.js", "engine.js", "tools.js", "labs.js", "class_dashboard.html", "teacher_guide.html"];
+const BUILD_FILES = ["index.html", "app.js", "engine.js", "tools.js", "rl.js", "journey.js", "labs.js", "journey_ui.js", "class_dashboard.html", "teacher_guide.html"];
 const buildHashes = async () => Object.fromEntries(await Promise.all(BUILD_FILES.map(async name => [name, createHash("sha256").update(await fs.readFile(path.join(output, name))).digest("hex")])));
 const testedBuild = await buildHashes();
+// The headless counterpart of module 12, from the same source files the page was built from.
+const require = createRequire(import.meta.url);
+const journeyApi = require("../student_journey.js"), engineApi = require("../student_engine.js");
+const labData = JSON.parse(await fs.readFile(path.join(output, "data/lab.json"), "utf8"));
+const nodeContext = { cfg: labData.config, tracks: new Map(labData.tracks.map(track => [track.id, new engineApi.Track(track)])) };
 const browser = await chromium.launch({ headless: true, args: ["--disable-gpu"] });
 
 async function setRange(page, id, value) {
@@ -279,6 +285,123 @@ try {
   check("robustness_download_exists", downloadNames.includes("robustness-experiment.json"));
   await finish(page, "robustness", "10_robustness");
 
+  // ---- 12. from zero to a lap (run before module 11 so that the results card lists it; recorded after module 11 to keep the kit's order) ----------------------
+  await visit(page, "journey");
+  check("journey_lists_every_valid_circuit_and_opens_on_the_saved_one", await page.locator("#journeyCircuit option").count() === 9 && await page.locator("#journeyCircuit").inputValue() === "9");
+  check("journey_starts_empty_with_nothing_to_replay", await page.locator("#journeyReplay").isDisabled() && await page.locator("#journeyMovie").isDisabled() && await page.locator("#journeyImitationStage").isDisabled()
+    && await page.locator('#model option[value="journeyReinforcement"]').isDisabled() && await page.locator('#model option[value="journeyImitation"]').isDisabled());
+  check("journey_reference_table_covers_every_circuit_and_the_reward_ablation", await rowCount(page, "journeyReferenceTable") === 9 && (await page.locator("#journeyAblation").textContent()).includes("Without it, 10/10 flick"));
+  await page.locator("#journeySaved").click(); await idle(page);
+  const savedExample = await page.evaluate(() => {
+    const j = studentLab.journey, both = ["imitation", "reinforcement"];
+    return { stages: both.map(m => j[m].stages.length), reproduced: both.every(m => j[m].stages.every(s => s.reproduced)), untrainedFails: both.every(m => !j[m].stages[0].lap.completed && j[m].stages[0].lap.progress < .05),
+      finalLaps: both.every(m => j[m].stages.at(-1).lap.completed), smooth: both.every(m => j[m].stages.at(-1).lap.flicker < StudentJourney.FLICKER_LIMIT), source: both.map(m => j[m].source) };
+  });
+  check("journey_saved_example_has_every_stage_of_both_learners", savedExample.stages.join() === "18,24" && savedExample.source.join() === "saved,saved");
+  check("journey_saved_example_is_driven_again_in_the_page_and_matches_what_was_saved", savedExample.reproduced && (await page.locator("#journeyStatus").innerText()).includes("matches the saved numbers"));
+  check("journey_untrained_cars_fail_at_once_and_the_final_cars_lap_smoothly", savedExample.untrainedFails && savedExample.finalLaps && savedExample.smooth);
+  check("journey_filmstrip_is_painted_and_has_a_picture_per_key_stage", await paintedColors(page, "journeyGallery") > 20 && await page.evaluate(() => studentLab.journeyCells.length) === 20);
+  check("journey_curves_show_the_ten_seed_reference_bands", (await page.locator("#journeyBandNote").innerText()).includes("Shaded bands") && await paintedColors(page, "journeyProgress") > 10 && await paintedColors(page, "journeyLapTime") > 10);
+  check("journey_stage_table_has_a_row_per_stage_and_the_summary_names_both_learners", await rowCount(page, "journeyTable") === 42
+    && (await page.locator("#journeyCompare").innerText()).includes("Reinforcement needed") && (await page.locator("#journeyCompare").innerText()).includes("Imitation"));
+  check("journey_final_cars_join_the_policy_menu", await page.evaluate(() => ["journeyImitation", "journeyReinforcement"].every(v => !document.querySelector(`#model option[value="${v}"]`).disabled)));
+  // Replaying: three whole laps side by side, at the faster journey speed, which is put back when the module is left.
+  await page.locator("#journeyReplay").click();
+  const replayed = await page.evaluate(() => ({ names: studentLab.runs.map(r => r.name), laps: studentLab.runs.map(r => r.metric.end_reason), longest: Math.min(...studentLab.runs.map(r => r.trace.at(-1).time)),
+    speed: document.getElementById("replaySpeed").value, camera: document.getElementById("camera").value }));
+  check("journey_replay_shows_the_two_final_cars_and_the_expert_on_a_whole_lap", replayed.names.length === 3 && replayed.names[0].startsWith("Imitation") && replayed.names[1].startsWith("Reinforcement") && replayed.names[2] === "Expert"
+    && replayed.laps.every(r => r === "section_complete") && replayed.longest > 100, JSON.stringify(replayed));
+  check("journey_replay_raises_the_speed_and_shows_the_whole_circuit", replayed.speed === "16" && replayed.camera === "overview");
+  check("journey_replay_panels_keep_one_colour_per_learner", await page.evaluate(() => studentLab.runs.map(r => r.color).join()) === "#ffc56b,#76a9ff,#4de2c2");
+  await page.waitForFunction(() => studentLab.replayTime > 8, null, { timeout: 30000 });
+  check("journey_replay_advances_at_the_chosen_speed", await page.evaluate(() => studentLab.replayPlaying && studentLab.replayTime > 8));
+  // Picking an early stage from the filmstrip replays a car that fails, with the failure marked. A slower speed the student chose is kept.
+  await page.locator("#replaySpeed").selectOption("2");
+  const pick = await page.evaluate(() => { const cell = studentLab.journeyCells.find(c => c.method === "reinforcement" && c.index === 2), canvas = document.getElementById("journeyGallery"), scale = canvas.clientWidth / canvas.width;
+    return { x: (cell.x + cell.size / 2) * scale, y: (cell.y + cell.size / 2) * scale }; });
+  await page.locator("#journeyGallery").click({ position: pick });
+  check("journey_a_later_replay_keeps_the_speed_the_student_chose", await page.locator("#replaySpeed").inputValue() === "2");
+  const early = await page.evaluate(() => ({ chosen: studentLab.journey.selected.reinforcement, reason: studentLab.runs[1].metric.end_reason, marked: !!studentLab.runs[1].marker, name: studentLab.runs[1].name }));
+  check("journey_clicking_a_picture_replays_that_stage_and_marks_where_it_failed", early.chosen === 2 && early.reason !== "section_complete" && early.marked && early.name.includes("Iteration 2"), JSON.stringify(early));
+  await setRange(page, "journeyImitationStage", 3);
+  check("journey_slider_selects_a_stage_and_describes_it", await page.evaluate(() => studentLab.journey.selected.imitation) === 3 && (await page.locator("#journeyImitationDetail").innerText()).includes("DAgger round 2"));
+  // The final cars drive in the other lessons through the policy menu.
+  const fromMenu = await page.evaluate(() => {
+    const final = method => StudentEngine.fingerprint(StudentEngine.Network.fromJSON(studentLab.journey[method].stages.at(-1).model));
+    const result = {};
+    for (const [value, method] of [["journeyImitation", "imitation"], ["journeyReinforcement", "reinforcement"]]) { document.getElementById("model").value = value; result[method] = StudentEngine.fingerprint(selectedModel()) === final(method); }
+    return result;
+  });
+  check("journey_policy_menu_hands_the_final_cars_to_the_other_lessons", fromMenu.imitation && fromMenu.reinforcement);
+  await page.locator("#model").selectOption("pretrained");
+  await visit(page, "predict");
+  check("journey_replay_speed_returns_to_the_lessons_default_when_the_module_is_left", await page.locator("#replaySpeed").inputValue() === "4");
+  check("journey_camera_returns_to_the_close_up_when_the_module_is_left", await page.locator("#camera").inputValue() === "follow");
+  check("journey_replay_view_goes_back_to_the_top_of_the_page_when_the_module_is_left", await page.evaluate(() => document.getElementById("view").parentNode.id !== "journeyViewHost"
+    && document.getElementById("view").nextElementSibling.id === "replayControls" && !!document.getElementById("view").offsetParent
+    && !!document.getElementById("camera").closest(".controls") && !document.getElementById("camera").closest("#journeyViewHost")));
+  await visit(page, "journey");
+  check("journey_replay_view_and_camera_menu_are_docked_next_to_the_filmstrip", await page.evaluate(() => document.getElementById("view").parentNode.id === "journeyViewHost" && document.getElementById("replayControls").parentNode.id === "journeyViewHost"
+    && !!document.getElementById("camera").closest("#journeyViewHost") && !document.getElementById("camera").closest(".controls")));
+  // The learning movie plays every picture of the filmstrip in turn; a cancel stops it, and so does leaving the module (which also puts the speed and camera back for good).
+  await page.locator("#replaySpeed").selectOption("32");
+  await page.locator("#journeyMovie").click();
+  await page.waitForFunction(() => document.getElementById("journeyStatus").textContent.includes("Learning movie: picture 2"), null, { timeout: 60000 });
+  await visit(page, "predict"); await idle(page, 60000); await page.waitForTimeout(1500);
+  check("journey_leaving_the_module_stops_the_movie_and_it_does_not_take_the_view_back", (await page.locator("#journeyStatus").innerText()).includes("stopped")
+    && await page.locator("#replaySpeed").inputValue() === "4" && await page.locator("#camera").inputValue() === "follow");
+  await visit(page, "journey");
+  await page.locator("#replaySpeed").selectOption("32");
+  await page.locator("#journeyMovie").click();
+  await page.waitForFunction(() => document.getElementById("journeyStatus").textContent.includes("Learning movie: picture 2"), null, { timeout: 60000 });
+  check("journey_movie_is_cancellable_while_it_plays", await cancelRunning(page));
+  await idle(page, 60000);
+  check("journey_cancelled_movie_says_so", (await page.locator("#journeyStatus").innerText()).includes("stopped") && (await error(page)) === "");
+  await page.locator("#journeyMovie").click(); await idle(page, 240000);
+  const movieStatus = await page.locator("#journeyStatus").innerText(), movieEnd = await page.evaluate(() => ({ imitation: studentLab.journey.selected.imitation, reinforcement: studentLab.journey.selected.reinforcement,
+    last: [studentLab.journey.imitation.stages.length - 1, studentLab.journey.reinforcement.stages.length - 1] }));
+  check("journey_movie_plays_every_picture_and_ends_on_the_final_cars", movieStatus.includes("finished") && movieEnd.imitation === movieEnd.last[0] && movieEnd.reinforcement === movieEnd.last[1], movieStatus);
+  await shot(page, "12_journey_saved_example");
+
+  // Live training with small budgets (extra menu entries keep the test quick): the page must produce exactly what the headless code produces.
+  await page.evaluate(() => { for (const [id, value] of [["journeyRounds", "8"], ["journeyIterations", "40"], ["journeyIterations", "12"]]) { const select = document.getElementById(id); if (![...select.options].some(o => o.value === value)) select.add(new Option(value, value)); } });
+  await page.locator("#journeyCircuit").selectOption("1"); await page.locator("#journeySeed").fill("1");
+  await page.locator("#journeyRounds").selectOption("8"); await page.locator("#journeyIterations").selectOption("40");
+  await slowFrames(page, 30);
+  await page.locator("#journeyBoth").click();
+  await page.waitForFunction(() => document.getElementById("journeyStatus").textContent.includes("Reinforcement: iteration"), null, { timeout: 60000 });
+  check("journey_reports_live_progress_and_blocks_a_second_action_while_training", await page.evaluate(() => studentLab.busy) && await page.locator("#cancelRun").isVisible());
+  await page.locator("#journeyReplay").click();
+  check("journey_replay_waits_for_a_running_experiment", (await error(page)).includes("Wait for the current experiment"));
+  await idle(page, 240000); await normalFrames(page);
+  const trained = await page.evaluate(() => ({ imitation: studentLab.journey.imitation.stages.map(StudentJourney.compactStage), reinforcement: studentLab.journey.reinforcement.stages.map(StudentJourney.compactStage),
+    circuit: studentLab.journey.trackId, sources: [studentLab.journey.imitation.source, studentLab.journey.reinforcement.source], band: document.getElementById("journeyBandNote").textContent }));
+  const headless = { imitation: (await journeyApi.imitationJourney({ track: nodeContext.tracks.get(1), ctx: nodeContext, seed: 1, rounds: 8 })).stages.map(journeyApi.compactStage),
+    reinforcement: (await journeyApi.reinforcementJourney({ track: nodeContext.tracks.get(1), ctx: nodeContext, seed: 1, iterations: 40 })).stages.map(journeyApi.compactStage) };
+  check("journey_training_in_the_browser_equals_the_headless_run_bit_for_bit", JSON.stringify(trained.imitation) === JSON.stringify(headless.imitation) && JSON.stringify(trained.reinforcement) === JSON.stringify(headless.reinforcement)
+    && trained.circuit === 1 && trained.sources.join() === "trained,trained");
+  check("journey_live_run_learns_to_lap_from_the_untrained_car", trained.reinforcement[0][2] === 0 && trained.reinforcement.at(-1)[2] === 1 && trained.imitation[0][2] === 0 && trained.imitation.some(row => row[2] === 1));
+  check("journey_bands_are_withheld_when_the_budget_differs_from_the_reference", trained.band.includes("appear when the budgets are the default"));
+  // Cancelling keeps the stages so far; the reward menu switches the smoothness term off and the page records it.
+  await page.locator("#journeyIterations").selectOption("100"); await slowFrames(page, 40);
+  await page.locator("#journeyReinforcement").click();
+  await page.waitForFunction(() => document.getElementById("journeyStatus").textContent.includes("iteration 3 "), null, { timeout: 60000 });
+  check("journey_reinforcement_run_is_cancellable", await cancelRunning(page));
+  await idle(page, 60000); await normalFrames(page);
+  const cancelled = await page.evaluate(() => { const r = studentLab.journey.reinforcement; return { stopped: r.stopped, last: r.stages.at(-1).iteration, count: r.stages.length, sliderMax: Number(document.getElementById("journeyReinforcementStage").max) }; });
+  check("journey_cancelled_run_keeps_the_car_as_it_stands", cancelled.stopped === "cancelled" && cancelled.last >= 3 && cancelled.last < 100 && cancelled.sliderMax === cancelled.count - 1 && (await error(page)) === "", JSON.stringify(cancelled));
+  await page.locator("#journeyIterations").selectOption("12"); await page.locator("#journeyReward").selectOption("0");
+  await page.locator("#journeyReinforcement").click(); await idle(page, 120000);
+  check("journey_reward_menu_switches_the_smoothness_term_off", await page.evaluate(() => studentLab.journey.reinforcement.settings.reward.smoothness === 0 && studentLab.journey.reinforcement.stages.at(-1).iteration === 12));
+  await page.locator("#journeyReward").selectOption("0.3"); await page.locator("#replaySpeed").selectOption("4");
+  // With only one learner trained, the replay keeps that learner's colour and the other one's absence is not papered over.
+  await page.locator("#journeyCircuit").selectOption("2"); await page.locator("#journeyReinforcement").click(); await idle(page, 120000);
+  await page.locator("#journeyReplay").click();
+  check("journey_one_learner_replay_keeps_that_learners_colour", await page.evaluate(() => studentLab.journey.trackId === 2 && studentLab.journey.imitation === null && studentLab.runs.map(r => r.color).join() === "#76a9ff,#4de2c2"
+    && document.getElementById("journeyImitationStage").disabled && document.getElementById("journeyImitationDetail").textContent === "Not trained yet."));
+  check("journey_counts_its_runs_for_the_results_card", await page.evaluate(() => ["journey_saved_loads", "journey_imitation_runs", "journey_reinforcement_runs", "journey_replays", "journey_movies"].every(key => studentLab.log.counts[key] > 0)));
+  await shot(page, "12_journey");
+
   // ---- 11. worksheets, quiz and results card -----------------------------------------------------------------------------------------------
   await visit(page, "worksheets");
   check("every_worksheet_listed", await page.locator("#worksheet option").count() === kit.worksheets.length);
@@ -324,6 +447,7 @@ try {
   check("results_card_has_no_free_text_or_timestamps", card.schema === "f1-ml-lab-results-card-v1" && !JSON.stringify(card).includes("<script") && !/\d{4}-\d{2}-\d{2}T/.test(JSON.stringify(card)) && !("evidence" in card) && !("hypothesis" in card));
   check("results_card_records_what_was_done", card.modules_visited.length === kit.modules.length && card.quiz.length === 2 && card.worksheets_completed.length >= kit.worksheets.length - 1 && card.exposure.test_exposed === true);
   await finish(page, "worksheets", "11_worksheets");
+  exercised.push("journey");
 
   // ---- persistence, printable guide and the class dashboard -------------------------------------------------------------------------------
   await visit(page, "dataset"); await page.locator("#clearDataset").click();

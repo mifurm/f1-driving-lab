@@ -12,7 +12,7 @@ const lab = {
   episode: 0, manual: null, recording: false, packet: null, stage: 0, runs: [], replayTime: 0, replayPlaying: false, last: null,
   testExposed: false, testLabelsExposed: false, frozen: null, exposureStorage: true, quizAttempts: [], comparisons: null, robustness: null,
   worksheet: null, localAblations: null, baselines: { ridge: null, knn: null }, playground: null, coverage: null, dagger: null, diagnosis: null,
-  importance: null, fresh: null, includeLegacy: false, log: { modules: new Set(), counts: {} },
+  importance: null, fresh: null, includeLegacy: false, journey: null, log: { modules: new Set(), counts: {} },
 };
 window.studentLab = lab;
 const colors = ["#ffc56b", "#76a9ff", "#4de2c2"];
@@ -49,6 +49,11 @@ function selectedModel() {
   if (choice === "ridge" || choice === "knn") {
     if (!lab.baselines[choice]) throw new Error("Train that baseline in module 6 first.");
     return lab.baselines[choice];
+  }
+  if (choice === "journeyImitation" || choice === "journeyReinforcement") {
+    const stages = lab.journey?.[choice === "journeyImitation" ? "imitation" : "reinforcement"]?.stages;
+    if (!stages?.length) throw new Error("Train that learner in module 12 first.");
+    return E.Network.fromJSON(stages.at(-1).model);
   }
   return reference;
 }
@@ -163,6 +168,11 @@ function drawScene(c, run, x, width, state, index, color) {
     c.fillStyle = "#ffc56b"; c.font = "bold 13px system-ui"; c.fillText(run.marker.label, p[0] + 15, p[1] - 9);
   }
   paintCar(c, state, project([state.x, state.y]), scale, color);
+  if ($("camera").value !== "follow") {
+    // On the whole circuit the car is a couple of pixels across, so mark where it is.
+    const [px, py] = project([state.x, state.y]);
+    c.beginPath(); c.arc(px, py, 5, 0, 2 * Math.PI); c.fillStyle = color; c.fill(); c.strokeStyle = "#ecf2fa"; c.lineWidth = 1.5; c.stroke();
+  }
   c.fillStyle = "#ecf2fa"; c.font = `bold ${width > 500 ? 19 : 13}px system-ui`; c.fillText(run.name, x + 12, 25);
   c.font = "12px system-ui"; c.fillText(`${state.time.toFixed(1)}s | ${(state.speed * 3.6).toFixed(0)} km/h | G${state.gear} | margin ${state.margin.toFixed(2)}m`, x + 12, height - 18);
   if (state.contact) { c.fillStyle = "#ff5b65"; c.font = "bold 22px system-ui"; c.fillText("WALL CONTACT", x + 12, 60); }
@@ -173,7 +183,7 @@ function draw() {
   const visible = lab.runs.slice(0, 3);
   for (const [i, run] of visible.entries()) {
     const pose = sample(run.trace, Math.min(lab.replayTime, run.trace.at(-1).time));
-    drawScene(c, run, i * cv.width / visible.length, cv.width / visible.length - 2, pose.state, pose.index, colors[i]);
+    drawScene(c, run, i * cv.width / visible.length, cv.width / visible.length - 2, pose.state, pose.index, run.color ?? colors[i]);
     if (i === 0) {
       const s = pose.state;
       $("telemetry").textContent = `${s.time.toFixed(1)} s | ${(s.speed * 3.6).toFixed(1)} km/h | target ${(s.targetSpeed * 3.6).toFixed(1)} km/h
@@ -202,7 +212,7 @@ function plot(id, spec) {
     c.fillStyle = "#acbbce"; c.textAlign = "right"; c.fillText(spec.format ? spec.format(v) : v < .01 && v > 0 ? v.toExponential(0) : String(+v.toFixed(3)), m.l - 6, my(v) + 4);
   }
   c.textAlign = "center";
-  for (const v of niceTicks(x0, x1, 5)) { c.fillStyle = "#acbbce"; c.fillText(String(Math.round(v * 10) / 10), mx(v), H - 14); }
+  for (const v of spec.xTicks ?? niceTicks(x0, x1, 5)) { c.fillStyle = "#acbbce"; c.fillText(spec.xFormat ? spec.xFormat(v) : String(Math.round(v * 10) / 10), mx(v), H - 14); }
   c.textAlign = "left"; c.fillStyle = "#ecf2fa"; c.font = "bold 13px system-ui"; c.fillText(spec.title ?? "", m.l, 16);
   c.font = "12px system-ui"; c.fillStyle = "#acbbce"; c.textAlign = "right"; c.fillText(spec.xLabel ?? "", W - m.r, H - 2); c.textAlign = "left";
   for (const band of spec.bands ?? []) {
@@ -813,7 +823,7 @@ function animate(now) {
       }
     } else if (lab.replayPlaying) {
       const duration = Math.max(0, ...lab.runs.map(run => run.trace.at(-1).time));
-      lab.replayTime = Math.min(duration, lab.replayTime + delta * 4); draw();
+      lab.replayTime = Math.min(duration, lab.replayTime + delta * Number($("replaySpeed").value)); draw();
       if (lab.replayTime >= duration) { lab.replayPlaying = false; $("replayPlay").textContent = "Play replay"; }
     }
   }

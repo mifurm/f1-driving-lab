@@ -27,6 +27,6 @@ jobs:
           node-version: 22
       - name: Syntax
         run: |
-          for file in student_engine.js student_tools.js student_app.js student_labs.js; do node --check "$file"; done
+          for file in student_engine.js student_tools.js student_rl.js student_journey.js student_app.js student_labs.js student_journey_ui.js tools/journey_reference.cjs; do node --check "$file"; done
       - name: Browser engine and statistics against the NumPy/SciPy reference fixture
         run: npm run test:engine

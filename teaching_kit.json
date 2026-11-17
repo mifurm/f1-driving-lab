@@ -15,7 +15,9 @@
     {"id": "O11", "text": "Explain why test data must stay unseen until the recipe is frozen, and recognise contamination."},
     {"id": "O12", "text": "Predict and measure the effect of noise, delay and reduced grip, and explain why measuring robustness is not the same as learning it."},
     {"id": "O13", "text": "Report uncertainty correctly: choose the unit of replication (training seed, fixed section, independent start), use the matching interval, and avoid over-reading small samples."},
-    {"id": "O14", "text": "State a hypothesis before running, change one factor, report the evidence and state the limits of the conclusion."}
+    {"id": "O14", "text": "State a hypothesis before running, change one factor, report the evidence and state the limits of the conclusion."},
+    {"id": "O15", "text": "Contrast imitation with reinforcement learning: what each is given (expert labels or a reward), who produces the experience it learns from, and what each costs in driving steps."},
+    {"id": "O16", "text": "Judge a learner by a whole-task test (a full lap) at every stage of training rather than by one good run, and explain how a reward that leaves something out can be satisfied in an unintended way."}
   ],
   "misconceptions": [
     {"id": "M1", "text": "Lower loss means the car will drive better.", "remedy": "Module 2 and Module 6 plot closed-loop success beside the loss: the loss can fall by half while success is flat or erratic. Offline error is measured on recorded states; driving compounds small errors."},
@@ -36,14 +38,17 @@
     {"id": "M16", "text": "Every trial in a pool is an independent sample, so pooled trials give a confidence interval.", "remedy": "Trials inside one fixed section share a track and start family. Sections (or seeds) are the unit of replication; pooled Wilson intervals are only valid for independent random starts."},
     {"id": "M17", "text": "A training step moves every weight by exactly the learning rate times its gradient.", "remedy": "Module 3 shows the real Adam update: running averages of the gradient and of its square rescale each weight's step, so weights with the same gradient can move by different amounts and the very first steps are normalised by bias correction."},
     {"id": "M18", "text": "Changing several settings at once finds the best recipe faster.", "remedy": "Module 11: when two factors change together, any difference has two possible causes. Change exactly one factor, keep starts, seeds and budgets matched, and state the prediction before running."},
-    {"id": "M19", "text": "Covariate shift is the same problem as test-set leakage.", "remedy": "Leakage is a bookkeeping error: evaluation information reaches training (Module 9). Covariate shift belongs to the method: the learner's own mistakes change which states it sees, so even perfectly clean data leaves gaps (Module 7)."}
+    {"id": "M19", "text": "Covariate shift is the same problem as test-set leakage.", "remedy": "Leakage is a bookkeeping error: evaluation information reaches training (Module 9). Covariate shift belongs to the method: the learner's own mistakes change which states it sees, so even perfectly clean data leaves gaps (Module 7)."},
+    {"id": "M20", "text": "Reinforcement learning is just imitation learning under another name, or a cheaper version of it.", "remedy": "Module 12 trains both on the same circuit with the same network. Imitation is given an expert's labels and needs a few hundred to a few thousand driving steps; reinforcement is given only a reward and needs tens of thousands before the car stays on the lap. Which costs less depends on whether you have an expert or a simulator you can crash freely."},
+    {"id": "M21", "text": "If the car completes the lap, or its reward score is high, it drives the way we want.", "remedy": "A reward measures only what it contains. Without a steering-smoothness term every reinforcement car got round the lap while flicking its steering every 0.1 s: the score was fine and the driving was not. Choose the reward without that term in Module 12 and compare the steering-movement column."},
+    {"id": "M22", "text": "The crash rate during training is the crash rate of the finished car.", "remedy": "Reinforcement learning explores by adding random noise to its commands while it trains, and that noise causes crashes the finished car would not make. The lap tests in Module 12 switch the noise off, which is why a noticeable share of training drives can still end in a crash while the lap test succeeds."}
   ],
   "quiz": [
     {"id": "Q1", "objective": "O1", "prompt": "What does the neural network output?",
      "choices": [
        {"text": "Steering and a target speed", "correct": true, "why": "Ordinary controllers turn the target speed into throttle, brake and gear."},
        {"text": "Throttle, brake and gear directly", "misconception": "M12", "why": "Pedals and gears are produced by fixed rules, not learned."},
-       {"text": "A reward for avoiding the wall", "why": "This lab uses imitation learning: there is no reward signal."}]},
+       {"text": "A reward for avoiding the wall", "why": "In modules 1 to 11 the network is trained from expert labels, not a reward. Module 12 adds a reinforcement learner that does use a reward, but its network still outputs steering and a target speed."}]},
     {"id": "Q2", "objective": "O2", "prompt": "Why are whole driving episodes assigned to either training or validation?",
      "choices": [
        {"text": "Neighbouring frames are almost identical, so random frame splits leak information", "correct": true, "why": "Validation then measures memory of near-duplicates rather than generalisation."},
@@ -118,7 +123,27 @@
      "choices": [
        {"text": "Report completed sections separately for nominal and recovery starts, never averaged into one number", "correct": true, "why": "A single average hides which situations each controller handles."},
        {"text": "Report only the progress percentage", "why": "A short failed run has high progress per second but no completed section."},
-       {"text": "Report only the best run", "misconception": "M10", "why": "Best-of selection overstates reliability."}]}
+       {"text": "Report only the best run", "misconception": "M10", "why": "Best-of selection overstates reliability."}]},
+    {"id": "Q17", "objective": "O15", "prompt": "An imitation learner and a reinforcement learner are each trained to drive the same circuit. What is each one given to learn from?",
+     "choices": [
+       {"text": "Imitation: the expert's steering and speed for the states it visits. Reinforcement: only a reward score for what it does, from experience it generates itself", "correct": true, "why": "What is supplied is what separates the two methods; the network and the car are the same."},
+       {"text": "Both are given the expert's steering for every state; reinforcement just trains for longer", "misconception": "M20", "why": "Reinforcement has no labels at all. It sees only the reward, so it has to discover good steering by trying things."},
+       {"text": "Imitation is given a reward and reinforcement is given labels", "why": "The other way round: labels belong to imitation, a reward to reinforcement."}]},
+    {"id": "Q18", "objective": "O15", "prompt": "In module 12 both cars complete the lap. What does comparing how they were trained show?",
+     "choices": [
+       {"text": "Reinforcement needed many times more driving steps before its car stayed on the lap, but it needed no expert to label any of them", "correct": true, "why": "The costs differ in kind: labels from an expert for imitation, a great deal of simulated experience for reinforcement."},
+       {"text": "Reinforcement needed fewer steps because it explores for itself", "misconception": "M20", "why": "Searching with only a reward is slow; an expert's label carries far more information per step."},
+       {"text": "Both needed about the same number of steps because they train the same network", "misconception": "M20", "why": "The network is the same, but the information each driving step carries is not."}]},
+    {"id": "Q19", "objective": "O16", "prompt": "A reinforcement car completes the lap, but its steering angle flips direction every 0.1 s. Its reward paid for distance and penalised crashing only. Which explanation fits best?",
+     "choices": [
+       {"text": "Nothing in the reward penalised flicking the steering, and flicking did not slow the lap, so nothing pushed the car to stop", "correct": true, "why": "The learner optimises exactly the reward it is given; behaviour the reward ignores is left to chance."},
+       {"text": "The algorithm has a bug: a correct reinforcement learner always drives smoothly", "misconception": "M21", "why": "The algorithm did what it was asked. The reward left smoothness out, so smoothness was never asked for."},
+       {"text": "It will smooth out with more training", "misconception": "M3", "why": "More training makes the car better at the reward as written, flicking included."}]},
+    {"id": "Q20", "objective": "O16", "prompt": "A car completes the lap at stage 3, fails at stages 4 and 5, then completes it at every stage from 6 onward. What should you report?",
+     "choices": [
+       {"text": "The car stays on the lap from stage 6; stage 3 showed it could lap but not that it was reliable, and several seeds would show how typical that is", "correct": true, "why": "A stage counts as learned when it and every later stage lap; the early success is evidence of ability, not of reliability."},
+       {"text": "It learned the lap at stage 3, and the later failures are noise", "misconception": "M5", "why": "One success is not reliability, and the failures that followed are evidence too."},
+       {"text": "Report the stage-3 lap time, because it was the best result", "misconception": "M10", "why": "Reporting the best or first success overstates reliability."}]}
   ],
   "modules": [
     {"id": "predict", "title": "Predict before moving", "minutes": 10, "objectives": ["O1"], "prerequisites": "None.",
@@ -153,7 +178,13 @@
      "discussion": ["Which shift causes the largest drop, and why does grip fail so abruptly in this toy model?", "How would you train for robustness and then check it?"]},
     {"id": "worksheets", "title": "Guided experiments", "minutes": 30, "objectives": ["O14"], "prerequisites": "Any two modules.",
      "misconceptions": ["M10", "M18"],
-     "discussion": ["Which of your hypotheses did the data contradict?", "What would a better experiment control?"]}
+     "discussion": ["Which of your hypotheses did the data contradict?", "What would a better experiment control?"]},
+    {"id": "journey", "title": "From zero to a lap: imitation versus reinforcement", "minutes": 35, "objectives": ["O15", "O16"], "prerequisites": "Modules 2 and 7.",
+     "misconceptions": ["M10", "M20", "M21", "M22"],
+     "discussion": ["Both learners start with a car that cannot drive. What did each need to be given before it could improve, and what did that cost?",
+       "Find the first picture in each row where the car completes a lap. Does the next picture also complete it? What does that say about trusting one good run?",
+       "Choose the reward without the steering-smoothness term and train again. Whose fault is the flicking steering: the algorithm's or the reward's? How would you notice a problem like this in a real project?",
+       "Which learner would you choose if you had no expert? If simulated crashes were free? If every real crash cost money?"]}
   ],
   "rubric": {
     "levels": ["Beginning", "Developing", "Proficient", "Exemplary"],
@@ -198,7 +229,10 @@
      "factors": ["noise", "delay", "grip"]},
     {"id": "ws_safety", "title": "Safety trade-offs", "module": "robustness", "objectives": ["O12", "O14"], "runner": "safety",
      "prompt": "Measure completed sections, wall contacts and minimum clearance separately. Can completion improve while clearance shrinks?",
-     "factors": ["noise", "delay", "grip"]}
+     "factors": ["noise", "delay", "grip"]},
+    {"id": "ws_journey", "title": "Imitation versus reinforcement", "module": "journey", "objectives": ["O15", "O16"], "runner": "journey",
+     "prompt": "Predict how many driving steps each learner needs before its car completes the lap and stays on it. Train both on one circuit for several seeds, then compare the medians, the final lap times and how many final cars flick the steering. Which prediction did the numbers contradict? (About a minute per seed.)",
+     "factors": []}
   ],
   "teacher": {
     "setup": [
@@ -210,7 +244,9 @@
       "The expert is a heuristic: about 2% of fast typical starts trip the lateral-acceleration limit within the first steps.",
       "Apex Park and Square Sprint contain small inner-wall loops at their tightest bends; they are excluded from the monitor and headline pools and flagged in the track list.",
       "Grip scales the lateral-acceleration limit and braking; it is a hard threshold, not a tyre-slip model.",
-      "Noise perturbs lane, heading and speed; the road previews stay ideal."
+      "Noise perturbs lane, heading and speed; the road previews stay ideal.",
+      "Module 12's reinforcement learner is a small PPO written for this lab. A training run takes about a minute of browser time, so the worksheet uses three seeds by default; the saved reference run (every circuit, ten seeds) takes about eight minutes on twelve cores.",
+      "Both module 12 learners are tested on the circuit they trained on; transfer to unseen circuits is module 9's question, and the imitation-versus-reinforcement comparison is of cost in this simulator, not a ranking of the two families."
     ]
   }
 }

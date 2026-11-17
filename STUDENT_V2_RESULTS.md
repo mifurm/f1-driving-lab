@@ -1,6 +1,6 @@
 # Student ML Driving Lab (version 2)
 
-Open `student_v2_artifacts/index.html` for the eleven interactive modules, `teacher_guide.html` for objectives, rubric, answer key and printable worksheets, and
+Open `student_v2_artifacts/index.html` for the twelve interactive modules (module 12 takes an imitation learner and a reinforcement learner from an untrained car to a whole lap), `teacher_guide.html` for objectives, rubric, answer key and printable worksheets, and
 `class_dashboard.html` to aggregate students' results cards. The first eight-module lab is preserved unchanged in `student_artifacts/`.
 
 ## What changed and why
@@ -88,6 +88,47 @@ Reading of this run (generated from the numbers above):
 - DAgger's learners crashed during 70 collection episodes (narrow demonstrations: 0); those are exactly the states where an expert's correction is needed, which is why failed collections are reported rather than hidden.
 - Comparisons with narrow or broad demonstrations change several things at once (schedule, start distribution and who drives); only the comparison with the staged control changes one. Fewer than ten seeds is exploratory, and nominal and recovery sections are never pooled.
 
+## From zero to a lap: imitation versus reinforcement learning (headless run of the browser engine)
+
+Module 12 trains both learners on one circuit and, after every stage of training, drives one whole lap from the start line with no help. Reinforcement learning is a PPO actor-critic with the same 18-24-16-2 policy network, trained from a reward only (no expert labels).
+
+Reference run: 9 circuits × 10 seeds (1–10) × 2 learners. Each learner trains on one circuit, then drives one full lap from the start line with no help.
+Imitation (DAgger): 16 rounds after the expert demonstrations, 150 labelled steps and 25 Adam updates per round.
+Reinforcement (PPO): 300 iterations × 8 drives × 256 steps = 614,400 simulated steps, no expert labels. One simulated step is 0.1 s of driving.
+First lap = the first snapshot whose car completes the lap. Stays lapping = the first snapshot from which it and every later snapshot complete the lap. Both are medians across seeds, in driving steps.
+Lost a lap = runs that fail the lap at some snapshot after having completed it. Final car = the last snapshot. Lap time / expert = the final car's lap time divided by the expert's on that circuit, mean over the seeds whose final car completes the lap.
+
+| Circuit | Expert lap | Imitation: first lap / stays lapping (steps) | Imitation: lost a lap at some stage | Imitation: final cars that lap | Imitation: lap time / expert | RL: first lap / stays lapping (steps) | RL: lost a lap at some stage | RL: final cars that lap | RL: lap time / expert |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 Velocity Ring GP-X | 108 s | 300 / 600 | 3/10 | 10/10 | 1.03× | 32,768 / 32,768 | 1/10 | 10/10 | 1.15× |
+| 2 Chicane Coast GP-X | 148 s | 675 / 750 | 3/10 | 10/10 | 1.08× | 51,200 / 92,160 | 2/10 | 10/10 | 1.07× |
+| 3 Hairpin Harbor GP-X | 169 s | 375 / 525 | 2/10 | 10/10 | 1.08× | 40,960 / 46,080 | 1/10 | 10/10 | 1.11× |
+| 4 Serpentine Valley GP-X | 129 s | 300 / 600 | 3/10 | 10/10 | 1.02× | 36,864 / 40,960 | 1/10 | 10/10 | 1.18× |
+| 5 Triangle GP GP-X | 119 s | 300 / 300 | 2/10 | 9/10 | 1.03× | 40,960 / 40,960 | 1/10 | 10/10 | 1.04× |
+| 7 Double Apex GP-X | 125 s | 300 / 975 | 6/10 | 10/10 | 1.05× | 32,768 / 32,768 | 0/10 | 10/10 | 1.24× |
+| 8 Crescent Run GP-X | 102 s | 300 / 975 | 4/10 | 10/10 | 1.02× | 32,768 / 32,768 | 1/10 | 10/10 | 1.34× |
+| 9 Technical Orchard GP-X | 131 s | 750 / 750 | 0/10 | 10/10 | 1.06× | 32,768 / 32,768 | 0/10 | 10/10 | 1.23× |
+| 10 High-Speed Mesa GP-X | 126 s | 450 / 675 | 4/10 | 10/10 | 1.09× | 36,864 / 36,864 | 0/10 | 10/10 | 1.22× |
+
+Imitation, all runs: first lap 375 steps, stays lapping from 750, final car laps in 89/90 runs, 27/90 runs failed at some stage after they had first completed the lap (1 in the final car), mean lap time 1.05× the expert's, 0/90 final cars flick the steering
+Reinforcement, all runs: first lap 40,960 steps, stays lapping from 40,960, final car laps in 90/90 runs, 7/90 runs failed at some stage after they had first completed the lap (0 in the final car), mean lap time 1.18× the expert's, 0/90 final cars flick the steering
+
+Reward ablation on circuit 9 (10 seeds each): with the steering-smoothness term (weight 0.3) 0/10 final cars flick the steering, mean 0.05° per step, lap time 1.23× the expert's; without it 10/10 flick it, mean 4.52° per step, lap time 1.12× the expert's.
+
+Reading of this run (generated from the numbers above):
+
+- The first lap needs far less experience with an expert's labels than with a reward alone: imitation's median first lap came after 375 labelled steps (0.6 min of driving), reinforcement's after 40,960 simulated steps (68 min).
+- A lap that *stays* a lap is a stricter test (the first stage from which every later stage also completes it): imitation 750 steps, reinforcement 40,960 steps, 55× as many.
+- The final cars: imitation completes the lap in 89 of 90 runs at 1.05× the expert's lap time on average, reinforcement in 90 of 90 runs at 1.18×. Neither learner improves smoothly: after first completing the lap, imitation failed it again at some later stage in 27 of 90 runs and reinforcement in 7 of 90 (in the final car: 1 and 0).
+- Reward design matters: on circuit 9 the final cars trained with the steering-smoothness term flick the steering in 0 of 10 runs (0.05° per step on average); trained without it, 10 of 10 do (4.52° per step). Lap times were 1.23× and 1.12× the expert's: the penalty costs a little speed.
+- Imitation also needed an expert that can label any state; reinforcement needed only a score and a simulator it can crash a hundred thousand times. Both learn one circuit and are tested on that circuit: this compares what each costs, not which method is better in general.
+
+![A lap attempt at each stage of training](student_v2_artifacts/visuals/journey_filmstrip.png)
+
+![The learning movie: each stage drives its whole lap, imitation left and reinforcement right](student_v2_artifacts/visuals/journey_learning.gif)
+
+![Learning curves, steering smoothness and driving needed on every circuit](student_v2_artifacts/visuals/journey_curves.png)
+
 ## Honest boundaries
 
 - The expert is a heuristic: 5 of 242 typical episodes and 1 of 44 stress drives ended early because the expert itself tripped a limit. A learner cannot exceed its labels.
@@ -96,12 +137,15 @@ Reading of this run (generated from the numbers above):
 - Grip is a hard threshold on lateral acceleration and braking, not a tyre-slip model; noise perturbs lane, heading and speed but not the ideal road previews; one simulator, one expert, original circuits, no real-car claim.
 - Browser and NumPy use different random streams (so noisy runs differ), but every deterministic quantity agrees: the browser engine replays all 2,560 saved NumPy rollouts of the retrained networks with identical outcomes and metrics within 1e-9 (`tests/student-engine.cjs`), and 24 fixture trajectories match to 1e-6 m (`tests/engine-fixtures.cjs`).
 - Curvature inputs are read from the centreline sample that *starts* at a boundary (`driving.SAMPLE_SNAP`), so one ulp of rounding noise cannot flip them between engines or platforms. Against the preserved first lab this changes a continuous metric in 69 of its 2,304 saved rollouts (never an outcome); `git tag lab-v1` marks the code that produced those files exactly.
+- Module 12's reinforcement learner is a small PPO actor-critic written for this lab (`student_rl.js`), not a library. Its learning rate (3e-4) and steering-smoothness weight (0.3) were chosen on a handful of circuits and seeds that the reference run also contains, so the reference describes this setup and is not a blind test of reinforcement learning. Both learners are tested on the circuit they trained on; module 9 is where transfer to unseen circuits is measured.
+- Module 12's saved example is replayed stage by stage in the NumPy simulator by `student_verify.py`. A car that steers smoothly reproduces to the 0.1 s; a car that flicks its steering is chaotic (a 1e-14 difference between two correct simulators grows to metres within 15 s), so for those only the outcome is expected to agree. That is one more reason the smoothness term is in the default reward.
 
 ## Reproduce
 
 ```sh
 .venv/bin/python student_experiments.py --output student_v2_artifacts --base wall_artifacts
 node tools/coverage_reference.cjs --artifact student_v2_artifacts
+node tools/journey_reference.cjs --artifact student_v2_artifacts    # about 8 minutes on 12 cores
 .venv/bin/python student_render.py --output student_v2_artifacts
 npm run test:student
 npm run test:engine && .venv/bin/python -m unittest discover -s tests

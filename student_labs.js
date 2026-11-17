@@ -412,6 +412,8 @@ function buildWorksheetControls() {
     case "masks": case "capacity": host.append(seeds("wsSeeds", 5)); break;
     case "shift": case "safety": host.append(factor, values(factorDefaults.noise), pool("wsPool"), seeds("wsSeeds", 10)); break;
     case "gradientCheck": host.append(controlHTML("Parameters to check", "wsParams", `<input id="wsParams" type="number" value="6" min="2" max="20">`)); break;
+    case "journey": host.append(controlHTML("Circuit", "wsCircuit", `<select id="wsCircuit">${validIds.map(id => `<option value="${id}"${id === 9 ? " selected" : ""}>${id} ${trackMap.get(id).name}</option>`).join("")}</select>`),
+      seeds("wsSeeds", 3), controlHTML("Reinforcement reward", "wsReward", `<select id="wsReward"><option value="0.3" selected>With the steering-smoothness term (default)</option><option value="0">Without it</option></select>`)); break;
     default: break;
   }
   if ($("wsFactor") && ["shift", "safety"].includes(ws.runner)) $("wsFactor").onchange = () => { $("wsValues").value = factorDefaults[$("wsFactor").value]; };
@@ -505,6 +507,28 @@ const wsRunners = {
     const a = lab.frozenAudit;
     return { headings: ["Record", "Value"], rows: [["Frozen model fingerprint", a.fingerprint], ["Test already exposed before this reveal", a.alreadyExposed ? "yes (results are exploratory)" : "no"], ["Test labels exposed (leakage lesson)", lab.testLabelsExposed ? "yes" : "no"],
       ["Sections evaluated", a.sections.length]], settings: { fingerprint: a.fingerprint }, raw: a.sections };
+  },
+  async journey() {
+    // Both learners on one circuit for several seeds, with the quick reinforcement budget (100 iterations, enough to get round and stay round on every circuit).
+    const trackId = Number($("wsCircuit").value), seeds = Number($("wsSeeds").value), smoothness = Number($("wsReward").value), track = trackMap.get(trackId), iterations = 100;
+    const JR = window.StudentJourney, expert = JR.expertLap(track, cfg).seconds, runs = { imitation: [], reinforcement: [] };
+    for (let seed = 1; seed <= seeds; seed++) {
+      const shared = { track, ctx, seed, yieldFn: tickYield, shouldCancel: () => lab.cancel };
+      message(`Worksheet: seed ${seed} of ${seeds}, imitation learner...`);
+      const imitation = await JR.imitationJourney(shared);
+      message(`Worksheet: seed ${seed} of ${seeds}, reinforcement learner (about 20 seconds)...`);
+      const reinforcement = await JR.reinforcementJourney({ ...shared, iterations, reward: { ...window.StudentRL.defaultReward, smoothness } });
+      if (lab.cancel) throw new Error("Cancelled: no result was recorded.");
+      runs.imitation.push({ seed, stages: imitation.stages.map(JR.compactStage) }); runs.reinforcement.push({ seed, stages: reinforcement.stages.map(JR.compactStage) });
+    }
+    const steps = s => s ? Math.round(s.median).toLocaleString("en-US") : "never";
+    const rows = ["imitation", "reinforcement"].map(method => {
+      const a = JR.aggregate(runs[method], expert);
+      return [method === "imitation" ? "Imitation (DAgger)" : "Reinforcement (PPO)", steps(a.firstLapSteps), steps(a.stableLapSteps), `${a.finalLaps}/${a.seeds}`,
+        a.ratio ? `${a.ratio.mean.toFixed(2)}×` : "—", `${a.flickering}/${a.seeds}`];
+    });
+    return { headings: ["Learner", "Driving steps to the first lap (median)", "Driving steps until it stays lapping (median)", "Final cars that lap", "Final lap time ÷ expert (mean)", "Final cars that flick the steering"],
+      rows, settings: { circuit: trackId, seeds, reinforcement_iterations: iterations, imitation_rounds: JR.defaults.imitation.rounds, reward_smoothness: smoothness }, raw: runs };
   },
   async shift(ws) { return shiftRunner(ws, false); },
   async safety(ws) { return shiftRunner(ws, true); },
