@@ -339,6 +339,12 @@ test("Paired conditions share starts and noise streams, and sections - not trial
   assert.equal(independent[0].wilson.n, 4); assert.ok(independent[0].wilson.lo <= independent[0].wilson.p);
   const rules = await T.runConditions({ conditions: [{ name: "Neural" }, { name: "Rules", policy: "rules" }], sections, seeds: [1, 2], model: pretrained, ctx });
   assert.notDeepEqual(rules.filter(r => r.condition === "Neural").map(r => r.metric.end_reason), rules.filter(r => r.condition === "Rules").map(r => r.metric.end_reason));
+  const live = [{ name: "Rules", policy: "rules" }, { name: "Neural", policy: pretrained.clone() }, { name: "Plain" }];
+  const exported = await T.runConditions({ conditions: live, sections, seeds: [1], model: pretrained, ctx });
+  assert.deepEqual([...new Set(exported.map(r => JSON.stringify(r.settings)))].sort(), ['{"name":"Neural","policy":"model"}', '{"name":"Plain"}', '{"name":"Rules","policy":"rules"}']);
+  assert.ok(JSON.stringify(exported).length < 100000 && !/weights|"mW"/.test(JSON.stringify(exported)), "an export must never embed the policy's weights");
+  assert.deepEqual(live.map(T.describeCondition).map(c => c.policy), ["rules", "model", undefined]);
+  assert.ok(typeof live[1].policy === "object", "describing a condition must not strip the live policy from the original");
   const pool = T.randomSections(new E.RNG(6), [1, 3], 6, T.defaultStarts.stress);
   assert.equal(pool.length, 6); assert.ok(pool.every(s => s.kind === "recovery") && new Set(pool.map(s => s.track_id)).size === 2);
 });

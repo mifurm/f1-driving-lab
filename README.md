@@ -39,7 +39,7 @@ keeps every preserved artifact and rebuilds the lab on evidence. Each row is som
 |---|---|
 | Validation held only deep wall-recovery states (median offset 5.08 m) while training was 89.5% near-centreline, so a 7.6x "generalization gap" was distribution shift, not overfitting | Training and validation are *different expert episodes from the same sampler* (93.6% vs 94.7% within 1 m of the centreline); near-identical starts cannot straddle splits; a separately named recovery-stress set is evaluation-only |
 | Loss was presented as learning, yet closed-loop success is flat or erratic while loss falls smoothly | Every training run records nominal and recovery driving beside the loss; ten saved reference seeds show the two diverging |
-| "Mean ± SD" of three binary outcomes | Seeds or fixed sections are the unit of replication: bootstrap intervals over seeds, paired comparisons with an exact sign test, Wilson intervals only for independent random starts, fewer than ten seeds labelled exploratory, diverged seeds counted as failures |
+| "Mean ± SD" of three binary outcomes | Seeds or fixed sections are the unit of replication: bootstrap intervals over seeds, paired comparisons with an exact sign test, Wilson intervals only for independent random starts, fewer than ten seeds labelled exploratory. In the browser a diverged seed counts as a failure; the reference pipeline records divergence and `student_verify.py` refuses to bless a run that contains one |
 | No student-facing DAgger or covariate shift | Module 7: narrow, broad, staged expert-only control and DAgger with equal budgets, projected state occupancy, and a step-by-step DAgger session. The saved ten-seed run reports that the closed-loop benefit is **not established** at this scale |
 | One architecture and one setting | Module 6: width, depth, batch size, schedules, weight decay, gradient clipping, early stopping, label noise, and ridge / nearest-neighbour baselines |
 | No account of *why* a drive failed | Module 8: expert labels at the true states, first disagreement, expert-recovery forks (a counterfactual about a state, not proof of cause) and dependency-aware permutation importance |
@@ -92,7 +92,7 @@ simulator change that would make the JavaScript engine stale fails CI. The brows
 Curvature inputs are piecewise constant, so a car whose nearest road point is a centreline vertex could read the neighbouring sample
 because of one ulp of rounding noise, which differs between libm builds and between the Python and JavaScript engines.
 `driving.sample_index` now assigns positions within 1e-9 samples of a boundary to the sample that starts there. Against the preserved
-first lab this changes continuous metrics (never an outcome) in 46 of 768 recorded rollouts; check out `lab-v1` to reproduce those files bit for bit.
+first lab this changes a continuous metric (never an outcome) in 69 of its 2,304 saved ablation, controller and robustness rollouts; check out `lab-v1` to reproduce those files bit for bit.
 
 ### Known limits
 

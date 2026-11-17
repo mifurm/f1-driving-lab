@@ -325,7 +325,7 @@ def prepare(output, base, workers=None):
             key = f"{mask}_{seed}"
             models[key], histories[key], diverged[key] = fit(x, y, vx, vy, sx, sy, seed, mask, output, key)
             print(f"Trained {key}: selected update {models[key].updates}"
-                  f"{' (DIVERGED, counted as a failed seed)' if diverged[key] else ''}.", flush=True)
+                  f"{' (DIVERGED: training stopped at the last finite update; the verifier refuses to bless a reference run with a diverged seed)' if diverged[key] else ''}.", flush=True)
     clean_leak, leak_history, _ = fit(x, y, vx, vy, sx, sy, 314, "full", output, "leakage_clean")
     write_json(output / "training_complete.json", {
         "fresh_test_ids": [13, 14, 15], "fresh_test_not_yet_evaluated": True,

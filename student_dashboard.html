@@ -17,7 +17,7 @@ Cards are self-reported browser sessions, so treat the aggregate as a classroom 
 <div id="results" hidden>
 <h2>Participation</h2><div class="panel"><table id="modulesTable"></table></div>
 <h2>Concept check</h2><div class="panel"><p id="quizSummary"></p><table id="objectivesTable"></table></div>
-<h2>Misconceptions behind wrong answers</h2><div class="panel"><p class="note">Counted from each student's most recent attempt (post if present, otherwise pre). Each wrong answer that maps to a misconception adds one.</p><table id="misconceptionsTable"></table></div>
+<h2>Misconceptions behind wrong answers</h2><div class="panel"><p class="note">Counted from each student's after-lesson attempt if present, otherwise the before-lesson attempt. Each wrong answer that maps to a misconception adds one. When a card holds several attempts in one phase, the first before-lesson attempt and the last after-lesson attempt count.</p><table id="misconceptionsTable"></table></div>
 <h2>Experiments run</h2><div class="panel"><table id="experimentsTable"></table></div>
 <h2>Cards</h2><div class="panel"><table id="cardsTable"></table></div>
 </div>
@@ -42,28 +42,29 @@ function validCard(card) {
   return card && card.schema === SCHEMA && Array.isArray(card.modules_visited) && Array.isArray(card.quiz) && typeof card.experiments === "object"
     && card.quiz.every(q => ["pre", "post"].includes(q.phase) && Number.isInteger(q.score) && Number.isInteger(q.total) && q.total > 0 && q.score >= 0 && q.score <= q.total && typeof q.by_objective === "object" && Array.isArray(q.misconceptions));
 }
-const latest = (card, phase) => card.quiz.filter(q => q.phase === phase).at(-1) ?? null;
+// The before-lesson baseline is the first attempt (taken before any feedback); the after-lesson score is the last one.
+const attempt = (card, phase) => { const all = card.quiz.filter(q => q.phase === phase); return (phase === "pre" ? all[0] : all.at(-1)) ?? null; };
 const mean = values => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
 const pct = v => v === null ? "n/a" : `${(100 * v).toFixed(0)}%`;
 function aggregate() {
   $("results").hidden = !cards.length; if (!cards.length) return;
   const n = cards.length, moduleRows = kit.modules.map(m => { const k = cards.filter(c => c.modules_visited.includes(m.id)).length; return [m.title, `${k}/${n}`, pct(k / n)]; });
   table("modulesTable", ["Module", "Cards that visited it", "Share"], moduleRows);
-  const pre = cards.map(c => latest(c, "pre")).filter(Boolean), post = cards.map(c => latest(c, "post")).filter(Boolean);
-  const both = cards.filter(c => latest(c, "pre") && latest(c, "post")), gain = mean(both.map(c => latest(c, "post").score / latest(c, "post").total - latest(c, "pre").score / latest(c, "pre").total));
+  const pre = cards.map(c => attempt(c, "pre")).filter(Boolean), post = cards.map(c => attempt(c, "post")).filter(Boolean);
+  const both = cards.filter(c => attempt(c, "pre") && attempt(c, "post")), gain = mean(both.map(c => attempt(c, "post").score / attempt(c, "post").total - attempt(c, "pre").score / attempt(c, "pre").total));
   $("quizSummary").textContent = `Pre-lesson: ${pre.length} cards, mean ${pct(mean(pre.map(q => q.score / q.total)))}. Post-lesson: ${post.length} cards, mean ${pct(mean(post.map(q => q.score / q.total)))}.
 ${both.length ? `Paired gain over ${both.length} cards with both attempts: ${gain >= 0 ? "+" : "−"}${Math.abs(100 * gain).toFixed(0)} percentage points (a descriptive average; with few cards it is not evidence of learning).` : "No card has both a pre and a post attempt yet."}`;
   const mastery = (set, id) => { const parts = set.map(q => q.by_objective[id]).filter(Boolean); const total = parts.reduce((s, [, t]) => s + t, 0); return total ? parts.reduce((s, [k]) => s + k, 0) / total : null; };
   table("objectivesTable", ["Objective", "Statement", "Correct before", "Correct after"], kit.objectives.map(o => [o.id, o.text, pct(mastery(pre, o.id)), pct(mastery(post, o.id))]));
   const counts = {};
-  for (const c of cards) { const q = latest(c, "post") ?? latest(c, "pre"); for (const id of q?.misconceptions ?? []) counts[id] = (counts[id] ?? 0) + 1; }
+  for (const c of cards) { const q = attempt(c, "post") ?? attempt(c, "pre"); for (const id of q?.misconceptions ?? []) counts[id] = (counts[id] ?? 0) + 1; }
   table("misconceptionsTable", ["Misconception", "Students", "Addressed in"], Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([id, k]) => {
     const m = misconceptionOf[id]; return [`${id}: ${m?.text ?? "unknown"}`, `${k}/${n}`, kit.modules.filter(x => x.misconceptions.includes(id)).map(x => x.title).join(", ") || "see teacher guide"]; }));
   const keys = [...new Set(cards.flatMap(c => Object.keys(c.experiments)))].sort();
   table("experimentsTable", ["Experiment", "Total runs", "Cards with at least one", "Mean runs per card"], keys.map(k => [k, cards.reduce((s, c) => s + (c.experiments[k] ?? 0), 0), cards.filter(c => (c.experiments[k] ?? 0) > 0).length, (cards.reduce((s, c) => s + (c.experiments[k] ?? 0), 0) / n).toFixed(1)]));
   const names = $("showNames").checked;
   table("cardsTable", [names ? "Nickname" : "Card", "Modules visited", "Pre-quiz", "Post-quiz", "Worksheets completed", "Sealed test exposed"], cards.map((c, i) => {
-    const a = latest(c, "pre"), b = latest(c, "post");
+    const a = attempt(c, "pre"), b = attempt(c, "post");
     return [names ? c.nickname || "(anonymous)" : `Card ${i + 1}`, c.modules_visited.length, a ? `${a.score}/${a.total}` : "none", b ? `${b.score}/${b.total}` : "none", (c.worksheets_completed ?? []).length, c.exposure?.test_exposed ? "yes" : "no"];
   }));
 }
@@ -80,7 +81,7 @@ $("cards").onchange = async () => {
 };
 $("showNames").onchange = aggregate;
 $("exportCsv").onclick = () => {
-  const rows = [["card", "modules_visited", "pre_score", "pre_total", "post_score", "post_total", "worksheets_completed", "test_exposed"], ...cards.map((c, i) => { const a = latest(c, "pre"), b = latest(c, "post");
+  const rows = [["card", "modules_visited", "pre_score", "pre_total", "post_score", "post_total", "worksheets_completed", "test_exposed"], ...cards.map((c, i) => { const a = attempt(c, "pre"), b = attempt(c, "post");
     return [`card${i + 1}`, c.modules_visited.length, a?.score ?? "", a?.total ?? "", b?.score ?? "", b?.total ?? "", (c.worksheets_completed ?? []).length, c.exposure?.test_exposed ? 1 : 0]; })];
   const url = URL.createObjectURL(new Blob([rows.map(r => r.join(",")).join("\r\n")], { type: "text/csv" }));
   const a = document.createElement("a"); a.href = url; a.download = "class-aggregate.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);

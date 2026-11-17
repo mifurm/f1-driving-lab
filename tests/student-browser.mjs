@@ -3,6 +3,7 @@
 // Every check runs the real engine in Chromium; nothing is mocked. Writes browser_verification.json, teacher_guide.pdf and screenshots.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -13,17 +14,32 @@ import { chromium } from "playwright";
 const output = path.resolve(process.argv[2] || "student_v2_artifacts");
 const kit = JSON.parse(await fs.readFile("teaching_kit.json", "utf8"));
 const python = process.env.PYTHON || (existsSync(".venv/bin/python") ? ".venv/bin/python" : "python3");
-const errors = [], checks = {}, exercised = [], downloadNames = [], scratch = await fs.mkdtemp(path.join(os.tmpdir(), "f1-lab-"));
-const check = (name, condition, detail = "") => { assert.ok(condition, `Check failed: ${name} ${detail}`); checks[name] = true; };
+const errors = [], checks = {}, exercised = [], downloadNames = [], failedChecks = [], scratch = await fs.mkdtemp(path.join(os.tmpdir(), "f1-lab-"));
+// KEEP_GOING=1 collects every failed check instead of stopping at the first (used to show that a new check fails on code without its fix).
+const keepGoing = process.env.KEEP_GOING === "1";
+const check = (name, condition, detail = "") => {
+  if (!condition && keepGoing) { failedChecks.push(`${name} ${detail}`.trim()); checks[name] = false; return; }
+  assert.ok(condition, `Check failed: ${name} ${detail}`); checks[name] = true;
+};
 // The page logs every handled error to the console. These come from the failure paths this test triggers on purpose; anything else is a bug.
-const intended = [/Make both predictions/, /nearly identical/, /does not match this lab/, /Learning rate: choose a number between/, /not a fresh test pack/, /Answer every question/];
+const intended = [/Make both predictions/, /nearly identical/, /does not match this lab/, /Learning rate: choose a number between/, /not a fresh test pack/, /Answer every question/,
+  /has no valid sections/, /no built-in circuit uses/, /check is already recorded/, /Cancelled: no DAgger session was started/, /Cancelled: the DAgger session was not changed/];
 const unexpected = text => !intended.some(pattern => pattern.test(text));
+// The report is only evidence for the exact build it exercised, so it carries the hashes of the page files; student_verify.py compares them with the files on disk.
+const BUILD_FILES = ["index.html", "app.js", "engine.js", "tools.js", "labs.js", "class_dashboard.html", "teacher_guide.html"];
+const buildHashes = async () => Object.fromEntries(await Promise.all(BUILD_FILES.map(async name => [name, createHash("sha256").update(await fs.readFile(path.join(output, name))).digest("hex")])));
+const testedBuild = await buildHashes();
 const browser = await chromium.launch({ headless: true, args: ["--disable-gpu"] });
 
 async function setRange(page, id, value) {
   await page.locator(`#${id}`).evaluate((input, next) => { input.value = next; input.dispatchEvent(new Event("input")); }, String(value));
 }
 const idle = (page, timeout = 240000) => page.waitForFunction(() => !studentLab.busy, null, { timeout });
+// Makes every yield inside the lab take about 60 ms, so a Cancel click lands inside a long action instead of racing it.
+const slowFrames = page => page.evaluate(() => { window.__raf = window.requestAnimationFrame; window.requestAnimationFrame = callback => window.setTimeout(() => callback(performance.now()), 60); });
+const normalFrames = page => page.evaluate(() => { window.requestAnimationFrame = window.__raf; });
+// Presses Cancel while a long action runs; false means the action had already finished (or never started) and there was nothing to cancel.
+const cancelRunning = page => page.locator("#cancelRun").click({ timeout: 5000 }).then(() => true, () => false);
 const error = page => page.locator("#error").innerText();
 async function visit(page, id) { await page.locator(`button[data-module="${id}"]`).click(); await page.waitForFunction(m => studentLab.module === m, id); }
 async function shot(page, name) { await page.screenshot({ path: path.join(output, "visuals", `${name}.png`), fullPage: true }); }
@@ -96,6 +112,12 @@ try {
   check("dataset_from_another_version_is_rejected", (await error(page)).includes("does not match"));
   await page.locator("#importDataset").setInputFiles({ name: "import.json", mimeType: "application/json", buffer: Buffer.from(savedDataset) });
   await page.waitForFunction(() => document.getElementById("status").textContent.includes("Imported"));
+  check("file_input_is_emptied_so_the_same_file_can_be_chosen_again", await page.locator("#importDataset").evaluate(input => input.files.length === 0 && input.value === ""));
+  await page.locator("#clearDataset").click();
+  check("clearing_removes_every_example", await page.evaluate(() => studentLab.rows.length === 0));
+  await page.locator("#importDataset").setInputFiles({ name: "import.json", mimeType: "application/json", buffer: Buffer.from(savedDataset) });
+  await page.waitForFunction(() => studentLab.rows.length > 0);
+  check("the_same_dataset_can_be_imported_again_after_clearing", await page.evaluate(() => studentLab.rows.length) === JSON.parse(savedDataset).rows.length);
   await page.locator("#updates").fill("400"); await page.locator("#trainStudent").click();
   await page.waitForFunction(() => studentLab.losses.length >= 3);
   check("cancel_button_appears_while_training", await page.locator("#cancelRun").isVisible());
@@ -136,6 +158,8 @@ try {
   check("expert_beats_rules_in_the_same_sections", outcomes.Expert > outcomes.Rules, JSON.stringify(outcomes));
   await page.locator("#downloadComparison").click(); await page.waitForTimeout(200);
   check("comparison_download_exists", downloadNames.includes("controller-comparison.json"));
+  const comparisonFile = await fs.readFile(path.join(output, "data/controller-comparison.json"), "utf8");
+  check("comparison_export_names_its_policies_but_never_embeds_weights", !/"weights"|"mW"|"biases"/.test(comparisonFile) && comparisonFile.includes('"policy": "model"') && comparisonFile.length < 600000, `${comparisonFile.length} bytes`);
   await finish(page, "controllers", "04_controllers");
 
   // ---- 5. remove inputs and retrain --------------------------------------------------------------------------------------------------
@@ -177,8 +201,16 @@ try {
   check("paired_comparisons_use_seeds_as_the_unit", await rowCount(page, "coveragePairs") === 4 && await page.evaluate(() => studentLab.coverage.comparisons.every(c => c.overall.wins + c.overall.losses + c.overall.ties === 3)));
   check("coverage_maps_painted", await paintedColors(page, "coverageMaps") > 30);
   await page.locator("#startDagger").click(); await idle(page);
-  await page.locator("#daggerRollout").click(); await idle(page); await page.locator("#daggerTrain").click(); await idle(page);
+  await page.locator("#daggerRollout").click(); await idle(page);
+  const snapshot = () => page.evaluate(() => { const d = studentLab.dagger; return JSON.stringify({ rows: d.rows.length, round: d.round, pending: d.pending?.rows.length ?? null, updates: d.net.updates, weights: StudentEngine.fingerprint(d.net) }); });
+  const beforeCancel = await snapshot(), pendingRows = await page.evaluate(() => { window.__session = studentLab.dagger; return studentLab.dagger.pending.rows.length; });
+  await slowFrames(page); await page.locator("#daggerTrain").click(); const cancelledRetrain = await cancelRunning(page); await idle(page); await normalFrames(page);
+  check("cancelling_dagger_retraining_leaves_the_session_exactly_as_it_was", cancelledRetrain && (await error(page)).startsWith("Cancelled") && await snapshot() === beforeCancel, `${await error(page)} ${await snapshot()} vs ${beforeCancel}`);
+  if (await page.locator("#daggerTrain").isEnabled()) { await page.locator("#daggerTrain").click(); await idle(page); }
   check("dagger_session_adds_learner_visited_states", await page.evaluate(() => studentLab.dagger.round === 1 && studentLab.dagger.rows.some(r => /learner rollout/.test(r.source)) && studentLab.dagger.log.length >= 2));
+  check("retraining_after_a_cancel_adds_each_state_exactly_once", await page.evaluate(n => { const d = studentLab.dagger; return d.rows.length === n && new Set(d.rows.map(r => r.id)).size === d.rows.length; }, JSON.parse(beforeCancel).rows + pendingRows));
+  await slowFrames(page); await page.locator("#startDagger").click(); const cancelledStart = await cancelRunning(page); await idle(page); await normalFrames(page);
+  check("cancelling_a_new_dagger_session_keeps_the_existing_one", cancelledStart && (await error(page)).startsWith("Cancelled") && await page.evaluate(() => studentLab.dagger === window.__session && studentLab.dagger.round === 1));
   await finish(page, "coverage", "07_coverage");
 
   // ---- 8. diagnose a failure ---------------------------------------------------------------------------------------------------------
@@ -204,9 +236,18 @@ try {
   await page.locator("#freshPack").setInputFiles(packPath); await page.waitForFunction(() => studentLab.fresh);
   await page.locator("#evaluateFresh").click(); await idle(page);
   check("fresh_pack_evaluated_once_on_the_frozen_model", await rowCount(page, "freshTable") === 8 && (await page.locator("#freshStatus").innerText()).includes("Frozen model"));
-  await page.locator("#freshPack").setInputFiles({ name: "bad.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ schema: "other" })) });
-  await page.waitForFunction(() => document.getElementById("error").textContent.includes("not a fresh test pack"));
-  check("a_foreign_file_is_not_accepted_as_a_fresh_pack", true);
+  const goodPack = JSON.parse(await fs.readFile(packPath, "utf8")), loadedPack = await page.evaluate(() => studentLab.fresh.fingerprint);
+  const rejectPack = async (name, mutate, expected) => {
+    const pack = JSON.parse(JSON.stringify(goodPack)); mutate(pack);
+    await page.locator("#freshPack").setInputFiles({ name, mimeType: "application/json", buffer: Buffer.from(JSON.stringify(pack)) });
+    const rejected = await page.waitForFunction(text => document.getElementById("error").textContent.includes(text), expected, { timeout: 5000 }).then(() => true, () => false);
+    return rejected && await page.evaluate(() => studentLab.fresh.fingerprint) === loadedPack;
+  };
+  check("a_foreign_file_is_not_accepted_as_a_fresh_pack", await rejectPack("foreign.json", pack => { pack.schema = "other"; }, "not a fresh test pack"));
+  check("a_pack_circuit_without_sections_is_rejected_up_front", await rejectPack("no-sections.json", pack => { delete pack.scenarios[pack.tracks[0].id]; }, "has no valid sections"));
+  check("a_pack_circuit_that_reuses_a_built_in_id_is_rejected", await rejectPack("clash.json", pack => { pack.tracks[0].id = 3; }, "no built-in circuit uses"));
+  check("a_pack_with_a_malformed_section_is_rejected", await rejectPack("bad-section.json", pack => { pack.scenarios[pack.tracks[0].id][0].speed = "fast"; }, "has no valid sections"));
+  check("file_input_is_emptied_after_a_rejected_pack", await page.locator("#freshPack").evaluate(input => input.files.length === 0));
   await page.locator("#demonstrateLeak").click(); await idle(page);
   check("leak_demonstration_trains_a_clone_on_test_labels", await page.evaluate(() => studentLab.leakage.valid_generalization === false && StudentEngine.fingerprint(studentLab.frozen)) === fingerprint);
   check("leakage_declared_invalid", (await page.locator("#leakStatus").innerText()).includes("INVALID"));
@@ -228,6 +269,11 @@ try {
     await page.locator("#runWorksheet").click(); await idle(page, 300000);
     check(`worksheet_${worksheet.id}_produced_results`, (await error(page)) === "" && await rowCount(page, "worksheetResults") >= 1, `${worksheet.id}: ${await error(page)}`);
   }
+  await page.locator("#worksheet").selectOption(String(kit.worksheets.findIndex(w => w.runner === "controllers"))); await page.locator("#wsSeeds").selectOption("3");
+  await page.locator("#hypothesis").fill("The expert will complete more sections than the rules."); await page.locator("#runWorksheet").click(); await idle(page, 300000);
+  await page.locator("#exportWorksheet").click(); await page.waitForTimeout(300);
+  const controllersExport = await fs.readFile(path.join(output, "data/ml-driving-worksheet.json"), "utf8");
+  check("worksheet_export_of_raw_trials_never_embeds_weights", !/"weights"|"mW"|"biases"/.test(controllersExport) && controllersExport.includes('"policy": "model"') && controllersExport.length < 1500000, `${controllersExport.length} bytes`);
   await page.locator("#worksheet").selectOption(String(kit.worksheets.findIndex(w => w.runner === "shift")));
   await page.locator("#runWorksheet").click(); await idle(page);
   await page.locator("#evidence").fill("Compared identical weights over matched seeds."); await page.locator("#conclusion").fill("A toy-model result is not a real-car safety guarantee.");
@@ -242,6 +288,11 @@ try {
   for (let q = 0; q < kit.quiz.length; q++) await page.locator(`input[name="quiz${q}"][value="1"]`).check();
   await page.locator("#gradeQuiz").click();
   check("wrong_answers_are_explained_and_mapped_to_misconceptions", (await page.locator("#quizReview").innerText()).includes("Common misconception") || (await page.locator("#quiz").innerText()).includes("Common misconception"));
+  check("a_graded_check_is_locked", await page.evaluate(() => [...document.querySelectorAll("#quiz input")].every(input => input.disabled)) && await page.locator("#gradeQuiz").isDisabled());
+  await page.locator("#quizPhase").selectOption("post"); await page.locator("#quizPhase").selectOption("pre");
+  check("returning_to_a_graded_phase_does_not_offer_a_second_baseline", await page.locator("#gradeQuiz").isDisabled() && (await page.locator("#quizFeedback").innerText()).includes("already recorded"));
+  await page.locator("#gradeQuiz").evaluate(button => { button.disabled = false; button.click(); });
+  check("the_handler_refuses_a_second_attempt_even_with_the_button_forced", (await error(page)).includes("already recorded") && await page.evaluate(() => studentLab.quizAttempts.length) === 1);
   await page.locator("#quizPhase").selectOption("post");
   check("a_new_attempt_reshuffles_the_choices", await page.evaluate(() => JSON.stringify(studentLab.quizOrder)) !== firstOrder);
   for (let q = 0; q < kit.quiz.length; q++) await page.locator(`input[name="quiz${q}"][value="0"]`).check();
@@ -271,16 +322,19 @@ try {
   dashboard.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) errors.push(`dashboard: ${message.text()}`); });
   dashboard.on("download", async download => { downloadNames.push(download.suggestedFilename()); await download.saveAs(path.join(output, "data", download.suggestedFilename())); });
   await dashboard.goto(pathToFileURL(path.join(output, "class_dashboard.html")).href);
-  const synthetic = (modules, pre, post, misconceptions) => ({ ...card, nickname: "x", modules_visited: modules, quiz: [
-    { phase: "pre", score: pre, total: 16, by_objective: { O1: [pre > 8 ? 1 : 0, 1] }, misconceptions: [] },
-    { phase: "post", score: post, total: 16, by_objective: { O1: [1, 1] }, misconceptions }] });
-  const files = [card, synthetic(["predict", "dataset"], 6, 12, ["M1", "M5"]), synthetic(kit.modules.map(m => m.id), 9, 15, ["M1"])]
+  const attemptOf = (phase, score, misconceptions = []) => ({ phase, score, total: 16, by_objective: { O1: [score > 8 ? 1 : 0, 1] }, misconceptions });
+  const synthetic = (modules, quiz) => ({ ...card, nickname: "x", modules_visited: modules, quiz });
+  // Card 2 holds two before-lesson attempts (6 then a perfect 16) and two after-lesson attempts (10 then 12): the baseline must stay the first, the final score the last.
+  const files = [card, synthetic(["predict", "dataset"], [attemptOf("pre", 6), attemptOf("pre", 16), attemptOf("post", 10, ["M1", "M5"]), attemptOf("post", 12, ["M1", "M5"])]),
+    synthetic(kit.modules.map(m => m.id), [attemptOf("pre", 9), attemptOf("post", 15, ["M1"])])]
     .map((value, i) => ({ name: `card${i}.json`, mimeType: "application/json", buffer: Buffer.from(JSON.stringify(value)) }));
   files.push({ name: "notes.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ hello: "world" })) });
   await dashboard.locator("#cards").setInputFiles(files);
   await dashboard.waitForFunction(() => document.getElementById("loaded").textContent.length > 0);
   check("dashboard_aggregates_valid_cards_and_rejects_others", (await dashboard.locator("#loaded").innerText()).includes("3 cards loaded, 1 rejected")
     && (await dashboard.locator("#error").innerText()).includes("notes.json") && await dashboard.locator("#cardsTable tbody tr").count() === 3);
+  const secondCard = await dashboard.locator("#cardsTable tbody tr:nth-child(2) td").allInnerTexts();
+  check("dashboard_baseline_is_the_first_before_attempt_and_the_final_is_the_last_after_attempt", secondCard[2] === "6/16" && secondCard[3] === "12/16", JSON.stringify(secondCard));
   const misconceptionText = await dashboard.locator("#misconceptionsTable").innerText();
   check("dashboard_counts_misconceptions_from_the_latest_attempt", misconceptionText.includes("M1") && misconceptionText.includes("2/3") && misconceptionText.includes("M5"));
   check("dashboard_reports_a_descriptive_paired_gain", (await dashboard.locator("#quizSummary").innerText()).includes("not evidence of learning"));
@@ -290,9 +344,41 @@ try {
   check("dashboard_exports_an_aggregate_csv", aggregate.length === 4 && aggregate[0].startsWith("card,modules_visited"));
   await dashboard.screenshot({ path: path.join(output, "visuals/12_class_dashboard.png"), fullPage: true });
 
-  assert.deepEqual(errors, []);
+  // ---- the sealed circuits stay unsealed: exposure is shared between tabs and can only grow ---------------------------------------------------
+  const pageUrl = pathToFileURL(path.join(output, "index.html")).href, EXPOSURE_KEY = "f1-student-lab-exposure-v1";
+  const openTab = async context => {
+    const tab = await context.newPage();
+    tab.on("pageerror", e => errors.push(`tab: ${e.message}`));
+    tab.on("console", message => { if (message.type() === "error" && unexpected(message.text())) errors.push(`tab: ${message.text()}`); });
+    await tab.goto(pageUrl); await tab.waitForFunction(() => !!window.studentLab);
+    return tab;
+  };
+  const freshContext = () => browser.newContext({ viewport: { width: 1300, height: 1000 } });
+  const shared = await freshContext(), tabA = await openTab(shared), tabB = await openTab(shared);
+  check("a_fresh_browser_profile_starts_sealed", await tabA.evaluate(() => !studentLab.testExposed) && await tabA.locator("#track option").count() === 13);
+  await visit(tabB, "generalization"); await tabB.locator("#model").selectOption("pretrained"); await tabB.locator("#freezeReveal").click(); await idle(tabB);
+  const heard = await tabA.waitForFunction(() => studentLab.testExposed, null, { timeout: 10000 }).then(() => true, () => false);
+  check("a_reveal_in_one_tab_unseals_every_open_tab", heard && await tabA.locator("#track option").count() === 16 && (await tabA.locator("#testExposure").innerText()).includes("exposed"));
+  // A tab that has not heard about a reveal (simulated by writing the record behind its back) must neither undo it nor call its own freeze the first reveal.
+  const staleTab = async () => {
+    const tab = await openTab(await freshContext());
+    await tab.evaluate(key => localStorage.setItem(key, JSON.stringify({ testExposed: true, testLabelsExposed: false })), EXPOSURE_KEY);
+    assert.ok(await tab.evaluate(() => !studentLab.testExposed), "the tab must still believe the circuits are sealed");
+    return tab;
+  };
+  const stale1 = await staleTab(); await visit(stale1, "dataset"); await stale1.locator("#clearDataset").click();
+  check("a_stale_tab_cannot_write_exposure_back_to_false", await stale1.evaluate(key => JSON.parse(localStorage.getItem(key)).testExposed === true && studentLab.testExposed === true, EXPOSURE_KEY));
+  const stale2 = await staleTab(); await stale2.locator("#model").selectOption("pretrained"); await visit(stale2, "generalization");
+  await stale2.locator("#freezeReveal").click(); await idle(stale2);
+  check("a_freeze_in_a_stale_tab_is_not_called_the_first_reveal", (await stale2.locator("#freezeStatus").innerText()).includes("already exposed"));
+  await tabB.reload(); await tabB.waitForFunction(() => !!window.studentLab);
+  check("exposure_survives_a_reload_of_the_revealing_tab", await tabB.evaluate(() => studentLab.testExposed));
+
+  if (keepGoing) failedChecks.push(...errors.map(text => `console or page error: ${text.slice(0, 160)}`)); else assert.deepEqual(errors, []);
+  assert.deepEqual(await buildHashes(), testedBuild, "the page files changed while they were being tested");
   for (const expected of ["student-driving-dataset.json", "student-driving-dataset.csv", "student-driving-model.json", "controller-comparison.json", "robustness-experiment.json", "ml-driving-worksheet.json", "ml-lab-results-card.json"])
     check(`download_${expected}`, downloadNames.includes(expected));
-  await fs.writeFile(path.join(output, "browser_verification.json"), JSON.stringify({ success: true, modules: exercised, checks, downloads: downloadNames, errors }, null, 2));
-  console.log(`Verified ${exercised.length} modules and ${Object.keys(checks).length} browser checks: training, cancellation, near-duplicate rejection, playground, coverage/DAgger, diagnosis, fresh pack, leakage, worksheets, quiz, results card and class dashboard.`);
+  await fs.writeFile(path.join(output, "browser_verification.json"), JSON.stringify({ success: failedChecks.length === 0, modules: exercised, checks, build_sha256: testedBuild, downloads: downloadNames, errors }, null, 2));
+  if (failedChecks.length) { console.log(`${failedChecks.length} FAILED CHECKS:\n- ${failedChecks.join("\n- ")}`); process.exitCode = 1; }
+  else console.log(`Verified ${exercised.length} modules and ${Object.keys(checks).length} browser checks: training, cancellation, near-duplicate rejection, playground, coverage/DAgger, diagnosis, fresh pack, leakage, worksheets, quiz, results card, cross-tab exposure and class dashboard.`);
 } finally { await browser.close(); await fs.rm(scratch, { recursive: true, force: true }); }

@@ -22,6 +22,7 @@ from student_experiments import CONDITIONS, MONITOR_TRACKS, _jittered, masked, m
 from wall_sim import WALL_CONFIG, corner_scenarios, wall_simulate
 
 SCRIPTS = (("student_engine.js", "engine.js"), ("student_tools.js", "tools.js"), ("student_app.js", "app.js"), ("student_labs.js", "labs.js"))
+BUILD_FILES = ("index.html", "app.js", "engine.js", "tools.js", "labs.js", "class_dashboard.html", "teacher_guide.html")  # keep in step with tests/student-browser.mjs
 RESULT_FIELDS = ("success", "section_complete", "centered_exit", "wall_contacts", "end_reason", "progress", "duration_s", "min_clearance_m",
                  "exit_mean_lateral_m", "mean_lateral_m", "peak_speed_kmh", "braking_s")
 END_REASONS = {"section_complete", "wall_contact", "lateral_acceleration_limit", "timeout", "numerical_divergence"}
@@ -239,6 +240,10 @@ def verify_browser(output, kit):
     require(report["modules"] == [m["id"] for m in kit["modules"]], "the browser run must visit every module in order")
     failed = [name for name, ok in report["checks"].items() if ok is not True]
     require(not failed, f"browser checks failed: {failed}")
+    # The report is evidence only for the build it exercised: a re-rendered page needs a fresh browser run.
+    tested = report.get("build_sha256", {})
+    stale = [name for name in BUILD_FILES if tested.get(name) != sha256(output / name)]
+    require(not stale, f"browser_verification.json was produced for a different build of {stale}; re-run the browser test")
     require((output / "teacher_guide.pdf").stat().st_size > 1000, "teacher_guide.pdf was not produced by the browser run")
     return report
 

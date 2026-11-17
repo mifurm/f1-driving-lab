@@ -253,10 +253,24 @@ function download(name, value, type = "application/json") {
   const a = document.createElement("a"); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function audit(model = selectedModel()) { return { engine: E.version, testExposed: lab.testExposed, testLabelsExposed: lab.testLabelsExposed, model: E.fingerprint(model) }; }
+const EXPOSURE_KEY = "f1-student-lab-exposure-v1";
+// Exposure of the sealed circuits can only grow. Another tab may have revealed (or exposed the labels of) the test set since this tab loaded, so what is
+// stored is merged into this tab before it is read or written: a stale tab can neither un-expose the circuits nor mislabel a later freeze as the first reveal.
+function mergeStoredExposure() {
+  if (!lab.exposureStorage) return false;
+  let stored;
+  try { const raw = localStorage.getItem(EXPOSURE_KEY); stored = raw === null ? null : JSON.parse(raw); }
+  catch (error) { if (!["SecurityError", "SyntaxError"].includes(error.name)) throw error; return false; }
+  if (!stored || typeof stored.testExposed !== "boolean" || typeof stored.testLabelsExposed !== "boolean") return false;
+  const before = [lab.testExposed, lab.testLabelsExposed];
+  lab.testExposed = lab.testExposed || stored.testExposed || stored.testLabelsExposed; lab.testLabelsExposed = lab.testLabelsExposed || stored.testLabelsExposed;
+  return lab.testExposed !== before[0] || lab.testLabelsExposed !== before[1];
+}
 function setExposure() {
+  mergeStoredExposure();
   if (lab.exposureStorage) {
     try {
-      localStorage.setItem("f1-student-lab-exposure-v1", JSON.stringify({ testExposed: lab.testExposed, testLabelsExposed: lab.testLabelsExposed }));
+      localStorage.setItem(EXPOSURE_KEY, JSON.stringify({ testExposed: lab.testExposed, testLabelsExposed: lab.testLabelsExposed }));
     } catch (error) {
       if (!["SecurityError", "QuotaExceededError"].includes(error.name)) throw error;
       lab.exposureStorage = false;
@@ -269,12 +283,12 @@ function setExposure() {
 }
 function restoreExposure() {
   try {
-    const raw = localStorage.getItem("f1-student-lab-exposure-v1");
+    const raw = localStorage.getItem(EXPOSURE_KEY);
     const stored = raw === null ? { testExposed: false, testLabelsExposed: false } : JSON.parse(raw);
     if (typeof stored.testExposed !== "boolean" || typeof stored.testLabelsExposed !== "boolean")
       throw new SyntaxError("Invalid exposure record");
     lab.testExposed = stored.testExposed || stored.testLabelsExposed; lab.testLabelsExposed = stored.testLabelsExposed;
-    localStorage.setItem("f1-student-lab-exposure-v1", JSON.stringify(stored));
+    localStorage.setItem(EXPOSURE_KEY, JSON.stringify(stored));
   } catch (error) {
     if (!["SecurityError", "QuotaExceededError", "SyntaxError"].includes(error.name)) throw error;
     lab.exposureStorage = false; lab.testExposed = true; lab.testLabelsExposed = true;
@@ -282,6 +296,13 @@ function restoreExposure() {
   }
   setExposure();
 }
+// Another tab changed the stored record: follow it (the track list and reference tables depend on it). Clearing storage elsewhere un-exposes nothing here.
+window.addEventListener("storage", event => {
+  if (event.key !== null && event.key !== EXPOSURE_KEY) return;
+  const changed = mergeStoredExposure();
+  setExposure();
+  if (changed) { fillTracks(); referenceTables(); }
+});
 
 // ---- manual recording ---------------------------------------------------------------------------------------------------------
 function manualStep() {
@@ -321,7 +342,7 @@ async function runExperiment({ conditions, model, poolKey, seeds, label = "exper
     onProgress: (done, total) => message(`Simulated section ${done}/${total} for every condition and seed...`) });
   if (lab.cancel) throw new Error("Cancelled: no result was recorded.");
   const independent = pool.random && seeds === 1;
-  return { audit: audit(model), label, pool: pool.label, poolKey, seeds: seedList, conditions, rows, baseline: conditions[0].name, independent,
+  return { audit: audit(model), label, pool: pool.label, poolKey, seeds: seedList, conditions: conditions.map(T.describeCondition), rows, baseline: conditions[0].name, independent,
     sections: pool.sections.map(s => ({ track_id: s.track_id, name: s.scenario.name, kind: s.kind })),
     summary: T.summarizeConditions(rows, new E.RNG(97), { independentStarts: independent }),
     exploratory: pool.sections.length < 8 || seeds < 10 };
@@ -351,7 +372,8 @@ function renderConditions(id, sectionsId, result) {
 function representativeRuns(result, model) {
   const section = result.sections.length ? poolSections(result.poolKey).sections[0] : null;
   return result.conditions.slice(0, 3).map(condition => {
-    const run = E.simulate(trackMap.get(section.track_id), cfg, condition.policy ?? model, T.pairedStart(section.scenario, result.seeds[0] * 1009),
+    const policy = condition.policy === "model" ? model : condition.policy ?? model;
+    const run = E.simulate(trackMap.get(section.track_id), cfg, policy, T.pairedStart(section.scenario, result.seeds[0] * 1009),
       { noise: condition.noise ?? 0, delay: condition.delay ?? 0, grip: condition.grip ?? 1, seed: result.seeds[0] });
     return { ...run, name: condition.name, track: trackMap.get(section.track_id) };
   });
@@ -545,8 +567,16 @@ install("downloadCSV", () => {
     ...lab.rows.map(row => [row.id, row.episode, row.split, row.source, row.track_id, ...row.features, ...row.targets])];
   download("student-driving-dataset.csv", rows.map(row => row.map(cells).join(",")).join("\r\n"), "text/csv");
 });
-$("importDataset").onchange = () => handle(async () => {
-  const file = $("importDataset").files[0]; if (!file) return;
+// A file input fires "change" only when the chosen file differs, so retrying the same file (after Clear, or after fixing a rejected file in place) would silently do
+// nothing. Reading the file and then emptying the input makes every selection count; the File object stays readable.
+function onFile(id, action) {
+  const input = $(id);
+  input.onchange = () => handle(async () => {
+    const file = input.files[0]; input.value = "";
+    if (file) await action(file);
+  });
+}
+onFile("importDataset", async file => {
   const imported = JSON.parse(await file.text());
   if (!E.compatibleVersions.includes(imported.version) || ["max_speed", "max_steer", "track_width", "car_width"].some(key => imported.config?.[key] !== cfg[key]))
     throw new Error("Dataset version or observation normalization does not match this lab.");
@@ -691,6 +721,7 @@ install("localAblation", async () => {
 install("freezeReveal", async () => {
   const chosen = selectedModel();
   if ($("model").value === "student" && chosen.updates === 0) throw new Error("Train your student model before freezing.");
+  mergeStoredExposure();
   const alreadyExposed = lab.testExposed;
   lab.frozen = chosen.clone ? chosen.clone() : chosen; const fingerprint = E.fingerprint(lab.frozen), rows = [];
   for (const track of tracks.filter(t => t.id >= 13)) {
@@ -729,12 +760,17 @@ install("demonstrateLeak", async () => {
   $("leakStatus").textContent = "INVALID BENCHMARK: the separate clone saw the very labels used for its test score. Your clean model was not overwritten.";
   message("Actual test-label training completed. A lower score, if observed, is not honest unseen performance."); count("leakage_demos");
 }, true);
-$("freshPack").onchange = () => handle(async () => {
-  const file = $("freshPack").files[0]; if (!file) return;
+onFile("freshPack", async file => {
   const pack = JSON.parse(await file.text());
   if (pack.schema !== "f1-ml-lab-fresh-pack-v1" || !Array.isArray(pack.tracks) || !pack.tracks.length || !pack.scenarios) throw new Error("This is not a fresh test pack for this lab.");
+  const finite = (...values) => values.every(v => typeof v === "number" && Number.isFinite(v));
+  if (new Set(pack.tracks.map(item => item.id)).size !== pack.tracks.length) throw new Error("Pack circuits need distinct ids.");
   const packTracks = pack.tracks.map(item => {
     for (const key of ["xy", "left", "right", "tangent", "normal", "heading", "curvature"]) if (!Array.isArray(item[key]) || !item[key].length) throw new Error(`Pack circuit ${item.name} is missing ${key}.`);
+    if (!finite(item.id, item.ds, item.length) || item.ds <= 0 || tracks.some(t => t.id === item.id)) throw new Error(`Pack circuit ${item.name} needs an id that no built-in circuit uses and a positive sample spacing.`);
+    const scenarios = pack.scenarios[item.id];
+    if (!Array.isArray(scenarios) || !scenarios.length || !scenarios.every(s => typeof s.name === "string" && finite(s.fraction, s.lateral, s.heading_error, s.speed)))
+      throw new Error(`Pack circuit ${item.name} has no valid sections.`);
     return new E.Track(item);
   });
   lab.fresh = { pack, tracks: packTracks, fingerprint: pack.fingerprint ?? "unspecified" };

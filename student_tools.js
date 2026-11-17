@@ -381,6 +381,11 @@
     });
   }
   // Every condition sees exactly the same (section, seed) starts and noise streams, so outcomes can be paired.
+  // A condition may carry a live policy (a network or baseline). Rows and exports keep only its name, so a download never embeds weights or a training set.
+  function describeCondition(condition) {
+    const { policy, ...rest } = condition;
+    return policy === undefined ? rest : { ...rest, policy: typeof policy === "string" ? policy : "model" };
+  }
   async function runConditions({ conditions, sections, seeds, model, ctx, yieldFn = noYield, shouldCancel = null, onProgress = null }) {
     const rows = [];
     for (const [sectionIndex, section] of sections.entries()) {
@@ -389,7 +394,7 @@
         for (const condition of conditions) {
           const result = E.simulate(ctx.tracks.get(section.track_id), ctx.cfg, condition.policy ?? model, initial,
             { noise: condition.noise ?? 0, delay: condition.delay ?? 0, grip: condition.grip ?? 1, seed });
-          rows.push({ condition: condition.name, seed, section: sectionIndex, track_id: section.track_id, kind: section.kind, initial, settings: condition, metric: result.metric });
+          rows.push({ condition: condition.name, seed, section: sectionIndex, track_id: section.track_id, kind: section.kind, initial, settings: describeCondition(condition), metric: result.metric });
         }
       }
       onProgress?.(sectionIndex + 1, sections.length);
@@ -519,7 +524,7 @@
 
   return { Z95, wilson, quantile, bootstrapMean, signTest, pairedDifference, summarizeSeeds, learningRateAt, modelLoss, fit,
     sectionsFor, evaluateSections, tally, RidgeModel, KNNModel, defaultStarts, sampleStart, collect, supportIndex, supportFraction,
-    coverageGrid, featurePoint, arms, runArm, coverageExperiment, pairedStart, randomSections, runConditions, summarizeConditions, actionErrors,
+    coverageGrid, featurePoint, arms, runArm, coverageExperiment, pairedStart, randomSections, describeCondition, runConditions, summarizeConditions, actionErrors,
     firstDivergence, snapshotFromRow, expertRecovery, defaultFeatureGroups, permutationImportance,
     startsAreNearDuplicates, findSplitLeak, validateEpisodeStarts, inSupport };
 });

@@ -240,10 +240,13 @@ function renderDagger(session) {
   table("daggerTable", ["Round", "Labelled states", "New states: failed episodes / rejected starts", "Loss on the learner's own new states", "Loss on fixed expert validation", "Stress loss", "Nominal (of 8)", "Recovery (of 8)"],
     session.log.map(r => [r.round, r.size, r.round === 0 ? "n/a" : `${r.failed} / ${r.rejected}`, r.newStateLoss === null ? "n/a" : fixed(r.newStateLoss), fixed(r.validation), fixed(r.stress), `${r.nominal.k}`, `${r.recovery.k}`]));
 }
-async function daggerTrain(session, updates) {
-  const fitted = await T.fit({ seed: session.seed, mask: "full", train: session.rows, validation: [], updates, learningRate: .001, initial: session.net, evalEvery: updates, lossSample: 256,
+// Trains a clone on `rows` and returns it. Cancelling or diverging throws before anything in the session changes, so a DAgger session is never left half-updated.
+async function daggerTrain(session, rows, updates) {
+  const fitted = await T.fit({ seed: session.seed, mask: "full", train: rows, validation: [], updates, learningRate: .001, initial: session.net.clone(), evalEvery: updates, lossSample: 256,
     rngSeed: session.seed + 100 + session.net.updates, yieldFn: tickYield, shouldCancel: () => lab.cancel });
-  session.net = fitted.net;
+  if (lab.cancel || fitted.stopped === "cancelled") throw new Error("Cancelled: the DAgger session was not changed.");
+  if (fitted.stopped === "diverged") throw new Error(`Training diverged at update ${fitted.divergence.update}: ${fitted.divergence.message}. The DAgger session was not changed.`);
+  return fitted.net;
 }
 install("startDagger", async () => {
   const budget = Number($("covBudget").value), updates = Number($("covUpdates").value), seed = 7, rng = new E.RNG(2024);
@@ -253,8 +256,9 @@ install("startDagger", async () => {
   for (const id of trainingIds) {
     const part = T.collect({ track: trackMap.get(id), cfg, driver: "expert", rng, steps: budget, spec: gen.starts.narrow, prefix: `d0`, firstEpisode: session.episode, source: "expert demonstration (round 0)" });
     session.episode += part.episodes; session.rows.push(...part.rows); failed += part.failures; rejected += part.rejected; await tickYield();
+    if (lab.cancel) throw new Error("Cancelled: no DAgger session was started.");
   }
-  await daggerTrain(session, updates);
+  session.net = await daggerTrain(session, session.rows, updates);
   session.log.push(daggerMetrics(session, { failed, rejected, newStateLoss: null })); lab.dagger = session; renderDagger(session);
   $("daggerRollout").disabled = false; $("daggerTrain").disabled = true; $("daggerReplay").disabled = false;
   $("daggerStatus").textContent = `Round 0: ${session.rows.length} expert-labelled states, ${updates} updates. Next: let the learner drive from typical starts while the expert labels the states it visits.`;
@@ -267,6 +271,7 @@ install("daggerRollout", async () => {
     const part = T.collect({ track: trackMap.get(id), cfg, driver: session.net, rng: session.rng, steps: session.budget, spec: gen.starts.typical, prefix: `d${session.round + 1}`,
       firstEpisode: session.episode, source: `learner rollout, expert label (round ${session.round + 1})` });
     session.episode += part.episodes; added.push(...part.rows); failed += part.failures; rejected += part.rejected; await tickYield();
+    if (lab.cancel) throw new Error("Cancelled: nothing was added to the DAgger session.");
   }
   const newStateLoss = T.modelLoss(session.net, added), validationLoss = T.modelLoss(session.net, session.validation);
   session.pending = { rows: added, failed, rejected, newStateLoss };
@@ -280,8 +285,8 @@ ${newStateLoss > validationLoss * 1.5 ? "the states it visits are harder than th
 install("daggerTrain", async () => {
   const session = dagger();
   if (!session.pending) throw new Error("Let the learner drive first.");
-  session.rows.push(...session.pending.rows); session.round++;
-  await daggerTrain(session, session.updates);
+  const rows = [...session.rows, ...session.pending.rows], net = await daggerTrain(session, rows, session.updates);
+  session.rows = rows; session.net = net; session.round++;
   const { failed, rejected, newStateLoss } = session.pending; session.pending = null;
   session.log.push(daggerMetrics(session, { failed, rejected, newStateLoss })); renderDagger(session);
   $("daggerRollout").disabled = session.round >= 10; $("daggerTrain").disabled = true;
@@ -528,10 +533,17 @@ install("printWorksheet", () => window.print());
 for (const [i, ws] of worksheets.entries()) { const option = document.createElement("option"); option.value = i; option.textContent = `${i + 1}. ${ws.title}`; $("worksheet").append(option); }
 
 function hashText(text) { let h = 2166136261; for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619); return h >>> 0; }
+const quizDone = phase => lab.quizAttempts.some(attempt => attempt.phase === phase);
+// The feedback reveals the answers, so a second graded attempt in the same phase would measure memory, not learning: each phase is graded once per session.
+function lockQuiz(note = "") {
+  for (const input of document.querySelectorAll("#quiz input")) input.disabled = true;
+  $("gradeQuiz").disabled = true;
+  if (note) $("quizFeedback").textContent = note;
+}
 function renderQuiz() {
-  const attempt = lab.quizAttempts.length;
+  const attempt = lab.quizAttempts.length, phase = $("quizPhase").value;
   lab.quizOrder = kit.quiz.map(q => new E.RNG(hashText(`${q.id}|${attempt}`)).shuffle(q.choices.map((_, k) => k)));
-  $("quiz").replaceChildren(); $("quizReview").replaceChildren(); $("quizFeedback").textContent = "";
+  $("quiz").replaceChildren(); $("quizReview").replaceChildren(); $("quizFeedback").textContent = ""; $("gradeQuiz").disabled = false;
   kit.quiz.forEach((q, i) => {
     const wrap = document.createElement("div"); wrap.className = "quizitem"; wrap.id = `quizitem${i}`;
     const p = document.createElement("p"); p.textContent = `${i + 1}. ${q.prompt}`; wrap.append(p);
@@ -541,9 +553,12 @@ function renderQuiz() {
     }
     $("quiz").append(wrap);
   });
+  if (quizDone(phase)) lockQuiz(`The ${phase === "pre" ? "before" : "after"}-lesson check is already recorded in this session. Choose the other phase, or reload the page to start over.`);
 }
 $("quizPhase").onchange = renderQuiz;
 install("gradeQuiz", () => {
+  const phase = $("quizPhase").value;
+  if (quizDone(phase)) throw new Error(`The ${phase === "pre" ? "before" : "after"}-lesson check is already recorded; choose the other phase.`);
   const answers = kit.quiz.map((q, i) => { const chosen = document.querySelector(`input[name="quiz${i}"]:checked`); return chosen ? Number(chosen.value) : null; });
   if (answers.some(a => a === null)) throw new Error("Answer every question before checking.");
   const byObjective = {}, misconceptions = new Set(); let score = 0;
@@ -559,8 +574,9 @@ install("gradeQuiz", () => {
     item.querySelector(".note")?.remove(); item.append(note);
   });
   const total = kit.quiz.length;
-  lab.quizAttempts.push({ phase: $("quizPhase").value, score, total, by_objective: byObjective, misconceptions: [...misconceptions] });
-  $("quizFeedback").textContent = `${score}/${total}. Review the colour-coded questions: each gives the reasoning, and wrong answers point to the module that addresses the misconception.`;
+  lab.quizAttempts.push({ phase, score, total, by_objective: byObjective, misconceptions: [...misconceptions] });
+  lockQuiz();
+  $("quizFeedback").textContent = `${score}/${total}. Review the colour-coded questions: each gives the reasoning, and wrong answers point to the module that addresses the misconception. This ${phase === "pre" ? "before" : "after"}-lesson check is now recorded; choose the other phase for the next one.`;
   const rows = Object.entries(byObjective).map(([id, [k, n]]) => [id, kit.objectives.find(o => o.id === id).text, `${k}/${n}`]);
   const review = document.createElement("div"); review.innerHTML = "<h4>Score by learning objective</h4><div class='table'><table id='quizObjectives'></table></div>"; $("quizReview").append(review);
   table("quizObjectives", ["Objective", "Statement", "Correct"], rows); count("quiz_attempts");
