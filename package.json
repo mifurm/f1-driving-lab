@@ -8,6 +8,7 @@
     "test:browser:multitrack": "node tests/multitrack-browser.mjs",
     "test:browser:race": "node tests/race-browser.mjs",
     "test:browser:walls": "node tests/wall-browser.mjs",
+    "test:engine": "node --test tests/engine-fixtures.cjs",
     "test:student": "node --test tests/student-engine.cjs",
     "test:browser:student": "node tests/student-browser.mjs"
   },

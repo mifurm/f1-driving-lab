@@ -3,7 +3,9 @@
   else root.StudentEngine = factory();
 })(globalThis, function () {
   "use strict";
-  const version = "student-lab-1";
+  const version = "student-lab-2";
+  // v1 datasets and models only lack the optional stress split and training options, so they stay importable.
+  const compatibleVersions = ["student-lab-1", "student-lab-2"];
   const clip = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const mod = (v, n) => ((v % n) + n) % n;
   const wrap = v => mod(v + Math.PI, 2 * Math.PI) - Math.PI;
@@ -27,6 +29,11 @@
       return Math.sqrt(-2 * Math.log(Math.max(this.uniform(), 1e-15))) * Math.cos(2 * Math.PI * this.uniform());
     }
     index(n) { if (n < 1) throw new Error("Cannot sample an empty dataset"); return Math.floor(this.uniform() * n); }
+    range(low, high) { return low + (high - low) * this.uniform(); }
+    shuffle(values) {
+      for (let i = values.length - 1; i > 0; i--) { const j = this.index(i + 1); [values[i], values[j]] = [values[j], values[i]]; }
+      return values;
+    }
   }
   const zeros = (rows, columns) => Array.from({ length: rows }, () => Array(columns).fill(0));
   const featureMasks = {
@@ -138,35 +145,49 @@
       }
       return { gw, gb, loss: loss / (2 * rows.length), predictions, activations: firstActivations };
     }
-    trainBatch(rows, learningRate = .001) {
+    trainBatch(rows, learningRate = .001, options = {}) {
       finite(learningRate, "Learning rate");
       if (learningRate <= 0 || learningRate > .05) throw new Error("Learning rate must be >0 and <=0.05");
+      const weightDecay = options.weightDecay ?? 0, maxGradNorm = options.maxGradNorm ?? null;
+      finite(weightDecay, "Weight decay");
+      if (weightDecay < 0 || weightDecay > 1) throw new Error("Weight decay must be between 0 and 1");
+      if (maxGradNorm !== null) { finite(maxGradNorm, "Gradient-norm limit"); if (maxGradNorm <= 0) throw new Error("Gradient-norm limit must be positive"); }
       const result = this.gradients(rows), changes = [];
+      let squares = 0;
+      for (const group of [result.gw, result.gb]) for (const layer of group) for (const entry of layer)
+        if (Array.isArray(entry)) for (const v of entry) squares += v * v; else squares += entry * entry;
+      const gradNorm = Math.sqrt(squares);
+      if (!Number.isFinite(result.loss) || !Number.isFinite(gradNorm))
+        throw new Error("numerical_divergence: non-finite loss or gradient; parameters were left unchanged. Lower the learning rate or check the data.");
+      const clipped = maxGradNorm !== null && gradNorm > maxGradNorm, scale = clipped ? maxGradNorm / gradNorm : 1;
       this.updates++;
-      const c1 = 1 - .9 ** this.updates, c2 = 1 - .999 ** this.updates;
+      const c1 = 1 - .9 ** this.updates, c2 = 1 - .999 ** this.updates, keep = options.trackChanges !== false;
       for (let l = 0; l < 3; l++) {
         for (let i = 0; i < this.weights[l].length; i++) {
           for (let j = 0; j < this.weights[l][i].length; j++) {
-            const gradient = result.gw[l][i][j], before = this.weights[l][i][j];
-            this.mW[l][i][j] = .9 * this.mW[l][i][j] + .1 * gradient;
-            this.vW[l][i][j] = .999 * this.vW[l][i][j] + .001 * gradient ** 2;
+            const gradient = result.gw[l][i][j], applied = gradient * scale, before = this.weights[l][i][j];
+            this.mW[l][i][j] = .9 * this.mW[l][i][j] + .1 * applied;
+            this.vW[l][i][j] = .999 * this.vW[l][i][j] + .001 * applied ** 2;
+            const decay = -learningRate * weightDecay * before;
             const delta = -learningRate * (this.mW[l][i][j] / c1) / (Math.sqrt(this.vW[l][i][j] / c2) + 1e-8);
+            this.weights[l][i][j] = before + decay;
             this.weights[l][i][j] += delta;
-            changes.push({ parameter: `W${l}[${i},${j}]`, layer: l, i, j, before, gradient, delta, after: this.weights[l][i][j] });
+            if (keep) changes.push({ parameter: `W${l}[${i},${j}]`, layer: l, i, j, before, gradient, applied, delta, decay, after: this.weights[l][i][j] });
           }
         }
         for (let j = 0; j < this.biases[l].length; j++) {
-          const gradient = result.gb[l][j], before = this.biases[l][j];
-          this.mB[l][j] = .9 * this.mB[l][j] + .1 * gradient;
-          this.vB[l][j] = .999 * this.vB[l][j] + .001 * gradient ** 2;
+          const gradient = result.gb[l][j], applied = gradient * scale, before = this.biases[l][j];
+          this.mB[l][j] = .9 * this.mB[l][j] + .1 * applied;
+          this.vB[l][j] = .999 * this.vB[l][j] + .001 * applied ** 2;
           const delta = -learningRate * (this.mB[l][j] / c1) / (Math.sqrt(this.vB[l][j] / c2) + 1e-8);
           this.biases[l][j] += delta;
-          changes.push({ parameter: `b${l}[${j}]`, layer: l, j, before, gradient, delta, after: this.biases[l][j] });
+          if (keep) changes.push({ parameter: `b${l}[${j}]`, layer: l, j, before, gradient, applied, delta, decay: 0, after: this.biases[l][j] });
         }
       }
-      result.changes = changes.sort((a, b) => Math.abs(b.gradient) - Math.abs(a.gradient)).slice(0, 6);
-      result.lossAfter = this.loss(rows);
+      result.changes = keep ? changes.sort((a, b) => Math.abs(b.gradient) - Math.abs(a.gradient)).slice(0, 6) : [];
+      result.lossAfter = options.skipLossAfter ? null : this.loss(rows);
       result.updates = this.updates;
+      Object.assign(result, { gradNorm, clipped, learningRate, weightDecay, maxGradNorm });
       return result;
     }
   }
@@ -188,7 +209,7 @@
       if (row.track_id >= 11 && !allowLeakage) throw new Error("Training/validation examples must come from the eleven training circuits");
       if (typeof row.source !== "string" || !row.source.length) throw new Error("Example source must be identified");
       if (typeof row.episode !== "string" || !row.episode.length) throw new Error("Examples must identify their driving episode");
-      if (!["train", "validation", "test"].includes(row.split)) throw new Error("Unknown dataset split");
+      if (!["train", "validation", "test", "stress"].includes(row.split)) throw new Error("Unknown dataset split");
       if (row.split === "test" && !allowLeakage) throw new Error("Test examples cannot be trained on outside the explicit leakage lesson");
       if (!Array.isArray(row.features) || row.features.length !== 18 || !Array.isArray(row.targets) || row.targets.length !== 2)
         throw new Error("Examples require 18 inputs and two labels");
@@ -393,6 +414,15 @@
       return { ...this.state, time: this.time, margin: this.margin, contact: this.contact, lateral: location[1],
         headingError: wrap(this.state.heading - location[2]), progress: this.progress };
     }
+    snapshot() {
+      return { state: { ...this.state }, margin: this.margin, contact: this.contact, time: this.time,
+        progress: this.progress, previous: this.previous };
+    }
+    restore(snapshot) {
+      this.state = { ...snapshot.state };
+      this.margin = snapshot.margin; this.contact = snapshot.contact; this.time = snapshot.time;
+      this.progress = snapshot.progress; this.previous = snapshot.previous;
+    }
   }
   const wrapDistance = (v, length) => mod(v + length / 2, length) - length / 2;
   function noisyFeatures(features, cfg, rng, noise = 0) {
@@ -410,25 +440,29 @@
     return [steering / cfg.max_steer, 2 * 14 / cfg.max_speed - 1];
   }
   function simulate(track, cfg, model, scenario, options = {}) {
-    const env = new Environment(track, cfg, options.grip ?? 1), rng = new RNG(options.seed ?? 1);
+    const env = new Environment(track, cfg, options.grip ?? 1), rng = options.rng ?? new RNG(options.seed ?? 1);
     const delay = options.delay ?? 0;
     if (!Number.isInteger(delay) || delay < 0 || delay > 20) throw new Error("Delay must be 0–20 observation steps");
-    env.reset(scenario);
+    if (options.snapshot) env.restore(options.snapshot); else env.reset(scenario);
     const trace = [env.record()], history = [];
     let reason = env.contact ? "wall_contact" : "timeout";
-    const goal = options.goal ?? 150;
+    const goal = options.goal ?? 150, record = options.record === true;
     if (!env.contact) {
       for (let step = 0; step < (options.maxSteps ?? 350); step++) {
         const observed = noisyFeatures(env.observe().features, cfg, rng, options.noise ?? 0);
         history.push(observed);
         const features = history[Math.max(0, history.length - 1 - delay)];
         const action = model === "expert" ? env.teacher() : model === "rules" ? rule(features, cfg) : model.predict(features);
+        if (!action.every(Number.isFinite)) { reason = "numerical_divergence"; break; }
+        // Recorded on the pre-step row: what the policy saw, what it did, and what the expert would do at the true state.
+        if (record) Object.assign(trace.at(-1), { features, action: action.slice(), expert: model === "expert" ? action.slice() : env.teacher() });
         const result = env.step(action);
         trace.push(env.record());
         if (result.reason || env.progress >= goal) { reason = result.reason || "section_complete"; break; }
       }
     }
-    const tail = trace.slice(-20), exitError = tail.reduce((v, s) => v + Math.abs(s.lateral), 0) / tail.length;
+    // A forked drive keeps the earlier states in the exit-centering window, exactly as the original drive would.
+    const tail = (options.history ? [...options.history, ...trace] : trace).slice(-20), exitError = tail.reduce((v, s) => v + Math.abs(s.lateral), 0) / tail.length;
     return { trace, metric: { success: Number(reason === "section_complete" && exitError < 1), end_reason: reason,
       wall_contacts: Number(trace.some(s => s.contact)), duration_s: env.time, progress: clip(env.progress / goal, 0, 1),
       min_clearance_m: Math.min(...trace.map(s => s.margin)), exit_mean_lateral_m: exitError,
@@ -445,6 +479,6 @@
     for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
     return (hash >>> 0).toString(16).padStart(8, "0");
   }
-  return { version, RNG, Network, Track, Environment, featureMasks, maskFeatures, derived, validateRows,
+  return { version, compatibleVersions, RNG, Network, Track, Environment, featureMasks, maskFeatures, derived, validateRows,
     simulate, noisyFeatures, rule, footprint, clip, wrap, meanSD, fingerprint };
 });
